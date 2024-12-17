@@ -7,23 +7,18 @@ import * as config from '../src/internal/config'
 import * as tar from '../src/internal/tar'
 import {CacheServiceClientJSON} from '../src/generated/results/api/v1/cache.twirp'
 import * as cacheHttpClient from '../src/internal/cacheHttpClient'
+import * as uploadUtils from '../src/internal/uploadUtils'
+import * as s3Utils from '../src/internal/s3Utils'
 import {UploadOptions} from '../src/options'
-
-let logDebugMock: jest.SpyInstance
+import {CreateCacheEntryResponse} from '../src/generated/results/api/v1/cache'
 
 jest.mock('../src/internal/tar')
+jest.mock('../src/internal/uploadUtils')
+jest.mock('../src/internal/s3Utils')
+jest.mock('../src/internal/cacheHttpClient')
 
-const uploadFileMock = jest.fn()
-const blockBlobClientMock = jest.fn().mockImplementation(() => ({
-  uploadFile: uploadFileMock
-}))
-jest.mock('@azure/storage-blob', () => ({
-  BlobClient: jest.fn().mockImplementation(() => {
-    return {
-      getBlockBlobClient: blockBlobClientMock
-    }
-  })
-}))
+let logDebugMock: jest.SpyInstance
+let createCacheEntryMock: jest.SpyInstance
 
 beforeAll(() => {
   process.env['ACTIONS_RUNTIME_TOKEN'] = 'token'
@@ -42,7 +37,20 @@ beforeAll(() => {
   // Ensure that we're using v2 for these tests
   jest.spyOn(config, 'getCacheServiceVersion').mockReturnValue('v2')
 
+  // Set up our mocks
   logDebugMock = jest.spyOn(core, 'debug')
+  createCacheEntryMock = jest.spyOn(
+    CacheServiceClientJSON.prototype,
+    'CreateCacheEntry'
+  )
+
+  // Mock uploadUtils and s3Utils
+  jest
+    .spyOn(uploadUtils, 'uploadCacheArchive')
+    .mockImplementation(async () => Promise.resolve())
+  jest
+    .spyOn(s3Utils, 'uploadToS3')
+    .mockImplementation(async () => Promise.resolve())
 })
 
 afterEach(() => {
@@ -141,7 +149,7 @@ test('save cache fails if a signedUploadURL was not passed', async () => {
   const archiveFileSize = 1024
   const options: UploadOptions = {
     archiveSizeBytes: archiveFileSize, // These should always match
-    useAzureSdk: true,
+    useS3Client: true,
     uploadChunkSize: 64 * 1024 * 1024,
     uploadConcurrency: 8
   }
@@ -181,12 +189,7 @@ test('save cache fails if a signedUploadURL was not passed', async () => {
     compression
   )
 
-  expect(saveCacheMock).toHaveBeenCalledWith(
-    -1,
-    archiveFile,
-    signedUploadURL,
-    options
-  )
+  expect(saveCacheMock).toHaveBeenCalledWith(-1, archiveFile, options)
   expect(getCompressionMock).toHaveBeenCalledTimes(1)
 })
 
@@ -195,11 +198,10 @@ test('finalize save cache failure', async () => {
   const key = 'Linux-node-bb828da54c148048dd17899ba9fda624811cfb43'
   const cachePaths = [path.resolve(paths)]
   const logWarningMock = jest.spyOn(core, 'warning')
-  const signedUploadURL = 'https://blob-storage.local?signed=true'
   const archiveFileSize = 1024
   const options: UploadOptions = {
-    archiveSizeBytes: archiveFileSize, // These should always match
-    useAzureSdk: true,
+    archiveSizeBytes: archiveFileSize,
+    useS3Client: true,
     uploadChunkSize: 64 * 1024 * 1024,
     uploadConcurrency: 8
   }
@@ -207,7 +209,10 @@ test('finalize save cache failure', async () => {
   const createCacheEntryMock = jest
     .spyOn(CacheServiceClientJSON.prototype, 'CreateCacheEntry')
     .mockReturnValue(
-      Promise.resolve({ok: true, signedUploadUrl: signedUploadURL})
+      Promise.resolve({
+        ok: true,
+        signedUploadUrl: ''
+      } as CreateCacheEntryResponse)
     )
 
   const createTarMock = jest.spyOn(tar, 'createTar')
@@ -244,12 +249,7 @@ test('finalize save cache failure', async () => {
     compression
   )
 
-  expect(saveCacheMock).toHaveBeenCalledWith(
-    -1,
-    archiveFile,
-    signedUploadURL,
-    options
-  )
+  expect(saveCacheMock).toHaveBeenCalledWith(-1, archiveFile, options)
   expect(getCompressionMock).toHaveBeenCalledTimes(1)
 
   expect(finalizeCacheEntryMock).toHaveBeenCalledWith({
@@ -268,15 +268,21 @@ test('save with valid inputs uploads a cache', async () => {
   const paths = 'node_modules'
   const key = 'Linux-node-bb828da54c148048dd17899ba9fda624811cfb43'
   const cachePaths = [path.resolve(paths)]
-  const signedUploadURL = 'https://blob-storage.local?signed=true'
   const createTarMock = jest.spyOn(tar, 'createTar')
   const archiveFileSize = 1024
   const options: UploadOptions = {
-    archiveSizeBytes: archiveFileSize, // These should always match
-    useAzureSdk: true,
+    archiveSizeBytes: archiveFileSize,
+    useS3Client: true,
     uploadChunkSize: 64 * 1024 * 1024,
     uploadConcurrency: 8
   }
+
+  createCacheEntryMock.mockImplementation(async () => {
+    return Promise.resolve({
+      ok: true,
+      signedUploadUrl: ''
+    } as CreateCacheEntryResponse)
+  })
 
   jest
     .spyOn(cacheUtils, 'getArchiveFileSizeInBytes')
@@ -286,7 +292,10 @@ test('save with valid inputs uploads a cache', async () => {
   jest
     .spyOn(CacheServiceClientJSON.prototype, 'CreateCacheEntry')
     .mockReturnValue(
-      Promise.resolve({ok: true, signedUploadUrl: signedUploadURL})
+      Promise.resolve({
+        ok: true,
+        signedUploadUrl: ''
+      } as CreateCacheEntryResponse)
     )
 
   const saveCacheMock = jest.spyOn(cacheHttpClient, 'saveCache')
@@ -305,12 +314,7 @@ test('save with valid inputs uploads a cache', async () => {
 
   const archiveFolder = '/foo/bar'
   const archiveFile = path.join(archiveFolder, CacheFilename.Zstd)
-  expect(saveCacheMock).toHaveBeenCalledWith(
-    -1,
-    archiveFile,
-    signedUploadURL,
-    options
-  )
+  expect(saveCacheMock).toHaveBeenCalledWith(-1, archiveFile, options)
   expect(createTarMock).toHaveBeenCalledWith(
     archiveFolder,
     cachePaths,

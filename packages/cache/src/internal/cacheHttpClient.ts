@@ -6,9 +6,8 @@ import {
   TypedResponse
 } from '@actions/http-client/lib/interfaces'
 import * as fs from 'fs'
-import {URL} from 'url'
 import * as utils from './cacheUtils'
-import {uploadCacheArchiveSDK} from './uploadUtils'
+import {uploadCacheArchive} from './uploadUtils'
 import {
   ArtifactCacheEntry,
   InternalCacheOptions,
@@ -18,11 +17,7 @@ import {
   ITypedResponseWithError,
   ArtifactCacheList
 } from './contracts'
-import {
-  downloadCacheHttpClient,
-  downloadCacheHttpClientConcurrent,
-  downloadCacheStorageSDK
-} from './downloadUtils'
+import {downloadCacheHttpClient, downloadCacheFromS3} from './downloadUtils'
 import {
   DownloadOptions,
   UploadOptions,
@@ -142,35 +137,49 @@ async function printCachesListForDiagnostics(
   }
 }
 
+function parseS3Url(url: string): {bucket: string; key: string} | null {
+  const s3Prefix = 's3://'
+  if (!url.startsWith(s3Prefix)) {
+    return null
+  }
+
+  const path = url.substring(s3Prefix.length)
+  const firstSlash = path.indexOf('/')
+  if (firstSlash === -1) {
+    return null
+  }
+
+  return {
+    bucket: path.substring(0, firstSlash),
+    key: path.substring(firstSlash + 1)
+  }
+}
+
 export async function downloadCache(
   archiveLocation: string,
   archivePath: string,
   options?: DownloadOptions
 ): Promise<void> {
-  const archiveUrl = new URL(archiveLocation)
   const downloadOptions = getDownloadOptions(options)
 
-  if (archiveUrl.hostname.endsWith('.blob.core.windows.net')) {
-    if (downloadOptions.useAzureSdk) {
-      // Use Azure storage SDK to download caches hosted on Azure to improve speed and reliability.
-      await downloadCacheStorageSDK(
-        archiveLocation,
+  try {
+    const s3Location = parseS3Url(archiveLocation)
+    if (s3Location && downloadOptions.useS3Client) {
+      await downloadCacheFromS3(
+        s3Location.bucket,
+        s3Location.key,
         archivePath,
         downloadOptions
       )
-    } else if (downloadOptions.concurrentBlobDownloads) {
-      // Use concurrent implementation with HttpClient to work around blob SDK issue
-      await downloadCacheHttpClientConcurrent(
-        archiveLocation,
-        archivePath,
-        downloadOptions
-      )
-    } else {
-      // Otherwise, download using the Actions http-client.
-      await downloadCacheHttpClient(archiveLocation, archivePath)
+      return
     }
-  } else {
+
+    // Fall back to HTTP client for non-S3 URLs or when S3 is disabled
     await downloadCacheHttpClient(archiveLocation, archivePath)
+  } catch (error) {
+    const errorMessage = `Failed to download cache: ${error.message}`
+    core.warning(errorMessage)
+    throw error
   }
 }
 
@@ -192,11 +201,15 @@ export async function reserveCache(
     version,
     cacheSize: options?.cacheSize
   }
-  const response = await retryTypedResponse('reserveCache', async () =>
-    httpClient.postJson<ReserveCacheResponse>(
-      getCacheApiUrl('caches'),
-      reserveCacheRequest
-    )
+
+  // Let postJson handle setting the headers for us
+  const response = await retryTypedResponse(
+    'reserveCache',
+    async () =>
+      await httpClient.postJson<ReserveCacheResponse>(
+        getCacheApiUrl('caches'),
+        reserveCacheRequest
+      )
   )
   return response
 }
@@ -327,34 +340,30 @@ async function commitCache(
 export async function saveCache(
   cacheId: number,
   archivePath: string,
-  signedUploadURL?: string,
   options?: UploadOptions
 ): Promise<void> {
   const uploadOptions = getUploadOptions(options)
+  const bucketName = process.env['AWS_BUCKET_NAME']
+  const cacheSize = utils.getArchiveFileSizeInBytes(archivePath)
 
-  if (uploadOptions.useAzureSdk) {
-    // Use Azure storage SDK to upload caches directly to Azure
-    if (!signedUploadURL) {
-      throw new Error(
-        'Azure Storage SDK can only be used when a signed URL is provided.'
-      )
-    }
-    await uploadCacheArchiveSDK(signedUploadURL, archivePath, options)
+  core.info(
+    `Cache Size: ~${Math.round(cacheSize / (1024 * 1024))} MB (${cacheSize} B)`
+  )
+
+  if (bucketName) {
+    // Upload directly to S3
+    const key = `cache/${cacheId}`
+    core.debug('Uploading cache to S3')
+    await uploadCacheArchive(bucketName, key, archivePath, uploadOptions)
+    core.info('Cache saved successfully to S3')
   } else {
+    // Upload using standard HTTP client
     const httpClient = createHttpClient()
+    core.debug('Uploading cache')
+    await uploadFile(httpClient, cacheId, archivePath, uploadOptions)
 
-    core.debug('Upload cache')
-    await uploadFile(httpClient, cacheId, archivePath, options)
-
-    // Commit Cache
-    core.debug('Commiting cache')
-    const cacheSize = utils.getArchiveFileSizeInBytes(archivePath)
-    core.info(
-      `Cache Size: ~${Math.round(
-        cacheSize / (1024 * 1024)
-      )} MB (${cacheSize} B)`
-    )
-
+    // Commit the cache after uploading
+    core.debug('Committing cache')
     const commitCacheResponse = await commitCache(
       httpClient,
       cacheId,
@@ -365,7 +374,6 @@ export async function saveCache(
         `Cache service responded with ${commitCacheResponse.statusCode} during commit cache.`
       )
     }
-
     core.info('Cache saved successfully')
   }
 }

@@ -5,8 +5,7 @@ import {
   getUploadOptions
 } from '../src/options'
 
-const useAzureSdk = false
-const concurrentBlobDownloads = true
+const useS3Client = true
 const downloadConcurrency = 8
 const timeoutInMs = 30000
 const segmentTimeoutInMs = 600000
@@ -16,8 +15,7 @@ test('getDownloadOptions sets defaults', async () => {
   const actualOptions = getDownloadOptions()
 
   expect(actualOptions).toEqual({
-    useAzureSdk,
-    concurrentBlobDownloads,
+    useS3Client,
     downloadConcurrency,
     timeoutInMs,
     segmentTimeoutInMs,
@@ -27,8 +25,7 @@ test('getDownloadOptions sets defaults', async () => {
 
 test('getDownloadOptions overrides all settings', async () => {
   const expectedOptions: DownloadOptions = {
-    useAzureSdk: true,
-    concurrentBlobDownloads: false,
+    useS3Client: true,
     downloadConcurrency: 14,
     timeoutInMs: 20000,
     segmentTimeoutInMs: 3600000,
@@ -44,7 +41,7 @@ test('getUploadOptions sets defaults', async () => {
   const expectedOptions: UploadOptions = {
     uploadConcurrency: 4,
     uploadChunkSize: 32 * 1024 * 1024,
-    useAzureSdk: false
+    useS3Client: true
   }
   const actualOptions = getUploadOptions()
 
@@ -55,7 +52,7 @@ test('getUploadOptions overrides all settings', async () => {
   const expectedOptions: UploadOptions = {
     uploadConcurrency: 2,
     uploadChunkSize: 16 * 1024 * 1024,
-    useAzureSdk: true
+    useS3Client: true
   }
 
   const actualOptions = getUploadOptions(expectedOptions)
@@ -67,7 +64,7 @@ test('env variables override all getUploadOptions settings', async () => {
   const expectedOptions: UploadOptions = {
     uploadConcurrency: 16,
     uploadChunkSize: 64 * 1024 * 1024,
-    useAzureSdk: true
+    useS3Client: true
   }
 
   process.env.CACHE_UPLOAD_CONCURRENCY = '16'
@@ -81,7 +78,7 @@ test('env variables override all getUploadOptions settings but do not exceed cap
   const expectedOptions: UploadOptions = {
     uploadConcurrency: 32,
     uploadChunkSize: 128 * 1024 * 1024,
-    useAzureSdk: true
+    useS3Client: true
   }
 
   process.env.CACHE_UPLOAD_CONCURRENCY = '64'
@@ -93,7 +90,7 @@ test('env variables override all getUploadOptions settings but do not exceed cap
 
 test('getDownloadOptions overrides download timeout minutes', async () => {
   const expectedOptions: DownloadOptions = {
-    useAzureSdk: false,
+    useS3Client: false,
     downloadConcurrency: 14,
     timeoutInMs: 20000,
     segmentTimeoutInMs: 3600000,
@@ -102,7 +99,7 @@ test('getDownloadOptions overrides download timeout minutes', async () => {
   process.env.SEGMENT_DOWNLOAD_TIMEOUT_MINS = '10'
   const actualOptions = getDownloadOptions(expectedOptions)
 
-  expect(actualOptions.useAzureSdk).toEqual(expectedOptions.useAzureSdk)
+  expect(actualOptions.useS3Client).toEqual(expectedOptions.useS3Client)
   expect(actualOptions.downloadConcurrency).toEqual(
     expectedOptions.downloadConcurrency
   )

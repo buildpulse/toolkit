@@ -57,14 +57,14 @@ test('getCacheVersion with enableCrossOsArchive as false returns version on wind
   }
 })
 
-test('downloadCache uses http-client for non-Azure URLs', async () => {
+test('downloadCache uses http-client for non-S3 URLs', async () => {
   const downloadCacheHttpClientMock = jest.spyOn(
     downloadUtils,
     'downloadCacheHttpClient'
   )
-  const downloadCacheStorageSDKMock = jest.spyOn(
+  const downloadCacheFromS3Mock = jest.spyOn(
     downloadUtils,
-    'downloadCacheStorageSDK'
+    'downloadCacheFromS3'
   )
 
   const archiveLocation = 'http://www.actionscache.test/download'
@@ -78,37 +78,34 @@ test('downloadCache uses http-client for non-Azure URLs', async () => {
     archivePath
   )
 
-  expect(downloadCacheStorageSDKMock).toHaveBeenCalledTimes(0)
+  expect(downloadCacheFromS3Mock).toHaveBeenCalledTimes(0)
 })
 
-test('downloadCache uses storage SDK for Azure storage URLs', async () => {
+test('downloadCache uses S3 client for S3 URLs', async () => {
   const downloadCacheHttpClientMock = jest.spyOn(
     downloadUtils,
     'downloadCacheHttpClient'
   )
-  const downloadCacheStorageSDKMock = jest.spyOn(
+  const downloadCacheFromS3Mock = jest.spyOn(
     downloadUtils,
-    'downloadCacheStorageSDK'
+    'downloadCacheFromS3'
   )
 
-  const downloadCacheHttpClientConcurrentMock = jest.spyOn(
-    downloadUtils,
-    'downloadCacheHttpClientConcurrent'
-  )
-
-  const archiveLocation = 'http://foo.blob.core.windows.net/bar/baz'
+  const bucket = 'my-bucket'
+  const key = 'cache/123'
+  const archiveLocation = `s3://${bucket}/${key}`
   const archivePath = '/foo/bar'
 
   await downloadCache(archiveLocation, archivePath)
 
-  expect(downloadCacheHttpClientConcurrentMock).toHaveBeenCalledTimes(1)
-  expect(downloadCacheHttpClientConcurrentMock).toHaveBeenCalledWith(
-    archiveLocation,
+  expect(downloadCacheFromS3Mock).toHaveBeenCalledTimes(1)
+  expect(downloadCacheFromS3Mock).toHaveBeenCalledWith(
+    bucket,
+    key,
     archivePath,
     getDownloadOptions()
   )
 
-  expect(downloadCacheStorageSDKMock).toHaveBeenCalledTimes(0)
   expect(downloadCacheHttpClientMock).toHaveBeenCalledTimes(0)
 })
 
@@ -117,49 +114,48 @@ test('downloadCache passes options to download methods', async () => {
     downloadUtils,
     'downloadCacheHttpClient'
   )
-  const downloadCacheStorageSDKMock = jest.spyOn(
+  const downloadCacheFromS3Mock = jest.spyOn(
     downloadUtils,
-    'downloadCacheStorageSDK'
+    'downloadCacheFromS3'
   )
 
-  const downloadCacheHttpClientConcurrentMock = jest.spyOn(
-    downloadUtils,
-    'downloadCacheHttpClientConcurrent'
-  )
-
-  const archiveLocation = 'http://foo.blob.core.windows.net/bar/baz'
+  const bucket = 'my-bucket'
+  const key = 'cache/123'
+  const archiveLocation = `s3://${bucket}/${key}`
   const archivePath = '/foo/bar'
   const options: DownloadOptions = {downloadConcurrency: 4}
 
   await downloadCache(archiveLocation, archivePath, options)
 
-  expect(downloadCacheHttpClientConcurrentMock).toHaveBeenCalledTimes(1)
-  expect(downloadCacheHttpClientConcurrentMock).toHaveBeenCalled()
-  expect(downloadCacheHttpClientConcurrentMock).toHaveBeenCalledWith(
-    archiveLocation,
+  expect(downloadCacheFromS3Mock).toHaveBeenCalledTimes(1)
+  expect(downloadCacheFromS3Mock).toHaveBeenCalled()
+  expect(downloadCacheFromS3Mock).toHaveBeenCalledWith(
+    bucket,
+    key,
     archivePath,
     getDownloadOptions(options)
   )
 
-  expect(downloadCacheStorageSDKMock).toHaveBeenCalledTimes(0)
   expect(downloadCacheHttpClientMock).toHaveBeenCalledTimes(0)
 })
 
-test('downloadCache uses http-client when overridden', async () => {
+test('downloadCache uses http-client when S3 is disabled', async () => {
   const downloadCacheHttpClientMock = jest.spyOn(
     downloadUtils,
     'downloadCacheHttpClient'
   )
-  const downloadCacheStorageSDKMock = jest.spyOn(
+  const downloadCacheFromS3Mock = jest.spyOn(
     downloadUtils,
-    'downloadCacheStorageSDK'
+    'downloadCacheFromS3'
   )
 
-  const archiveLocation = 'http://foo.blob.core.windows.net/bar/baz'
+  const bucket = 'my-bucket'
+  const key = 'cache/123'
+  const archiveLocation = `s3://${bucket}/${key}`
   const archivePath = '/foo/bar'
   const options: DownloadOptions = {
-    useAzureSdk: false,
-    concurrentBlobDownloads: false
+    downloadConcurrency: 4,
+    useS3Client: false
   }
 
   await downloadCache(archiveLocation, archivePath, options)
@@ -170,5 +166,5 @@ test('downloadCache uses http-client when overridden', async () => {
     archivePath
   )
 
-  expect(downloadCacheStorageSDKMock).toHaveBeenCalledTimes(0)
+  expect(downloadCacheFromS3Mock).toHaveBeenCalledTimes(0)
 })

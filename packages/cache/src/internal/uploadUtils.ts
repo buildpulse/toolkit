@@ -1,13 +1,7 @@
 import * as core from '@actions/core'
-import {
-  BlobClient,
-  BlobUploadCommonResponse,
-  BlockBlobClient,
-  BlockBlobParallelUploadOptions
-} from '@azure/storage-blob'
-import {TransferProgressEvent} from '@azure/ms-rest-js'
-import {InvalidResponseError} from './shared/errors'
 import {UploadOptions} from '../options'
+import {uploadToS3} from './s3Utils'
+import {Progress} from '@aws-sdk/lib-storage'
 
 /**
  * Class for tracking the upload state and displaying stats.
@@ -79,11 +73,11 @@ export class UploadProgress {
   }
 
   /**
-   * Returns a function used to handle TransferProgressEvents.
+   * Returns a function used to handle Progress events.
    */
-  onProgress(): (progress: TransferProgressEvent) => void {
-    return (progress: TransferProgressEvent) => {
-      this.setSentBytes(progress.loadedBytes)
+  onProgress(): (progress: Progress) => void {
+    return (progress: Progress) => {
+      this.setSentBytes(progress.loaded ?? 0)
     }
   }
 
@@ -120,55 +114,34 @@ export class UploadProgress {
 }
 
 /**
- * Uploads a cache archive directly to Azure Blob Storage using the Azure SDK.
- * This function will display progress information to the console. Concurrency of the
- * upload is determined by the calling functions.
+ * Uploads a cache archive to S3.
+ * This function will display progress information to the console.
  *
- * @param signedUploadURL
- * @param archivePath
- * @param options
- * @returns
+ * @param bucket The S3 bucket name
+ * @param key The S3 object key
+ * @param archivePath Path to the archive file to upload
+ * @param options Upload options
  */
-export async function uploadCacheArchiveSDK(
-  signedUploadURL: string,
+export async function uploadCacheArchive(
+  bucket: string,
+  key: string,
   archivePath: string,
   options?: UploadOptions
-): Promise<BlobUploadCommonResponse> {
-  const blobClient: BlobClient = new BlobClient(signedUploadURL)
-  const blockBlobClient: BlockBlobClient = blobClient.getBlockBlobClient()
+): Promise<void> {
   const uploadProgress = new UploadProgress(options?.archiveSizeBytes ?? 0)
-
-  // Specify data transfer options
-  const uploadOptions: BlockBlobParallelUploadOptions = {
-    blockSize: options?.uploadChunkSize,
-    concurrency: options?.uploadConcurrency, // maximum number of parallel transfer workers
-    maxSingleShotSize: 128 * 1024 * 1024, // 128 MiB initial transfer size
-    onProgress: uploadProgress.onProgress()
-  }
 
   try {
     uploadProgress.startDisplayTimer()
 
-    core.debug(
-      `BlobClient: ${blobClient.name}:${blobClient.accountName}:${blobClient.containerName}`
-    )
+    await uploadToS3(bucket, key, archivePath, {
+      partSize: options?.uploadChunkSize,
+      queueSize: options?.uploadConcurrency
+    })
 
-    const response = await blockBlobClient.uploadFile(
-      archivePath,
-      uploadOptions
-    )
-
-    // TODO: better management of non-retryable errors
-    if (response._response.status >= 400) {
-      throw new InvalidResponseError(
-        `uploadCacheArchiveSDK: upload failed with status code ${response._response.status}`
-      )
-    }
-
-    return response
+    return
   } catch (error) {
     core.warning(
-      `uploadCacheArchiveSDK: internal error uploading cache archive: ${error.message}`
+      `uploadCacheArchive: internal error uploading cache archive: ${error.message}`
     )
     throw error
   } finally {

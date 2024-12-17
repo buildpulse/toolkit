@@ -142,7 +142,7 @@ test('restore with gzip compressed cache found', async () => {
   const signedDownloadUrl = 'https://blob-storage.local?signed=true'
   const cacheVersion =
     'd90f107aaeb22920dba0c637a23c37b5bc497b4dfa3b07fe3f79bf88a273c11b'
-  const options = {useAzureSdk: true} as DownloadOptions
+  const options = {useS3Client: true} as DownloadOptions
 
   const getCacheVersionMock = jest.spyOn(cacheUtils, 'getCacheVersion')
   getCacheVersionMock.mockReturnValue(cacheVersion)
@@ -218,7 +218,7 @@ test('restore with zstd compressed cache found', async () => {
   const signedDownloadUrl = 'https://blob-storage.local?signed=true'
   const cacheVersion =
     '8e2e96a184cb0cd6b48285b176c06a418f3d7fce14c29d9886fd1bb4f05c513d'
-  const options = {useAzureSdk: true} as DownloadOptions
+  const options = {useS3Client: true} as DownloadOptions
 
   const getCacheVersionMock = jest.spyOn(cacheUtils, 'getCacheVersion')
   getCacheVersionMock.mockReturnValue(cacheVersion)
@@ -295,7 +295,7 @@ test('restore with cache found for restore key', async () => {
   const signedDownloadUrl = 'https://blob-storage.local?signed=true'
   const cacheVersion =
     'b8b58e9bd7b1e8f83d9f05c7e06ea865ba44a0330e07a14db74ac74386677bed'
-  const options = {useAzureSdk: true} as DownloadOptions
+  const options = {useS3Client: true} as DownloadOptions
 
   const getCacheVersionMock = jest.spyOn(cacheUtils, 'getCacheVersion')
   getCacheVersionMock.mockReturnValue(cacheVersion)
@@ -371,7 +371,7 @@ test('restore with lookup only enabled', async () => {
   const signedDownloadUrl = 'https://blob-storage.local?signed=true'
   const cacheVersion =
     'd90f107aaeb22920dba0c637a23c37b5bc497b4dfa3b07fe3f79bf88a273c11b'
-  const options = {lookupOnly: true, useAzureSdk: true} as DownloadOptions
+  const options = {lookupOnly: true, useS3Client: true} as DownloadOptions
 
   const getCacheVersionMock = jest.spyOn(cacheUtils, 'getCacheVersion')
   getCacheVersionMock.mockReturnValue(cacheVersion)

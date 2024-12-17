@@ -28,7 +28,7 @@ export async function createTempDirectory(): Promise<string> {
       baseLocation = process.env['USERPROFILE'] || 'C:\\'
     } else {
       if (process.platform === 'darwin') {
-        baseLocation = '/Users'
+        baseLocation = '/tmp'
       } else {
         baseLocation = '/home'
       }

@@ -42,9 +42,8 @@
     "@actions/glob": "^0.1.0",
     "@actions/http-client": "^2.1.1",
     "@actions/io": "^1.0.1",
-    "@azure/abort-controller": "^1.1.0",
-    "@azure/ms-rest-js": "^2.6.0",
-    "@azure/storage-blob": "^12.13.0",
+    "@aws-sdk/client-s3": "^3.713.0",
+    "@aws-sdk/lib-storage": "^3.713.0",
     "@protobuf-ts/plugin": "^2.9.4",
     "semver": "^6.3.1",
     "twirp-ts": "^2.5.0"

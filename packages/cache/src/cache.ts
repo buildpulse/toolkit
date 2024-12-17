@@ -218,10 +218,10 @@ async function restoreCacheV2(
   options?: DownloadOptions,
   enableCrossOsArchive = false
 ): Promise<string | undefined> {
-  // Override UploadOptions to force the use of Azure
+  // Override options to force the use of S3
   options = {
     ...options,
-    useAzureSdk: true
+    useS3Client: true
   }
   restoreKeys = restoreKeys || []
   const keys = [primaryKey, ...restoreKeys]
@@ -425,7 +425,7 @@ async function saveCacheV1(
     }
 
     core.debug(`Saving Cache (ID: ${cacheId})`)
-    await cacheHttpClient.saveCache(cacheId, archivePath, '', options)
+    await cacheHttpClient.saveCache(cacheId, archivePath, options)
   } catch (error) {
     const typedError = error as Error
     if (typedError.name === ValidationError.name) {
@@ -462,14 +462,12 @@ async function saveCacheV2(
   options?: UploadOptions,
   enableCrossOsArchive = false
 ): Promise<number> {
-  // Override UploadOptions to force the use of Azure
-  // ...options goes first because we want to override the default values
-  // set in UploadOptions with these specific figures
+  // Override options to force the use of S3
   options = {
     ...options,
     uploadChunkSize: 64 * 1024 * 1024, // 64 MiB
     uploadConcurrency: 8, // 8 workers for parallel upload
-    useAzureSdk: true
+    useS3Client: true
   }
   const compressionMethod = await utils.getCompressionMethod()
   const twirpClient = cacheTwirpClient.internalCacheTwirpClient()
@@ -512,6 +510,7 @@ async function saveCacheV2(
     }
 
     // Set the archive size in the options, will be used to display the upload progress
+    options = options || {}
     options.archiveSizeBytes = archiveFileSize
 
     core.debug('Reserving Cache')
@@ -533,12 +532,7 @@ async function saveCacheV2(
     }
 
     core.debug(`Attempting to upload cache located at: ${archivePath}`)
-    await cacheHttpClient.saveCache(
-      cacheId,
-      archivePath,
-      response.signedUploadUrl,
-      options
-    )
+    await cacheHttpClient.saveCache(cacheId, archivePath, options)
 
     const finalizeRequest: FinalizeCacheEntryUploadRequest = {
       key,

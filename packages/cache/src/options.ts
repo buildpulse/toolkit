@@ -5,13 +5,9 @@ import * as core from '@actions/core'
  */
 export interface UploadOptions {
   /**
-   * Indicates whether to use the Azure Blob SDK to download caches
-   * that are stored on Azure Blob Storage to improve reliability and
-   * performance
-   *
-   * @default false
+   * S3 bucket name for cache storage
    */
-  useAzureSdk?: boolean
+  bucket?: string
   /**
    * Number of parallel cache upload
    *
@@ -28,6 +24,12 @@ export interface UploadOptions {
    * Archive size in bytes
    */
   archiveSizeBytes?: number
+
+  /**
+   * Whether to use the S3 client for uploads
+   * @default true
+   */
+  useS3Client?: boolean
 }
 
 /**
@@ -35,31 +37,26 @@ export interface UploadOptions {
  */
 export interface DownloadOptions {
   /**
-   * Indicates whether to use the Azure Blob SDK to download caches
-   * that are stored on Azure Blob Storage to improve reliability and
-   * performance
-   *
-   * @default true
+   * S3 bucket name for cache storage
    */
-  useAzureSdk?: boolean
+  bucket?: string
 
   /**
-   * Number of parallel downloads (this option only applies when using
-   * the Azure SDK)
+   * Number of parallel downloads
    *
    * @default 8
    */
   downloadConcurrency?: number
 
   /**
-   * Indicates whether to use Actions HttpClient with concurrency
-   * for Azure Blob Storage
+   * Whether to use the S3 client for downloads
+   *
+   * @default true
    */
-  concurrentBlobDownloads?: boolean
+  useS3Client?: boolean
 
   /**
-   * Maximum time for each download request, in milliseconds (this
-   * option only applies when using the Azure SDK)
+   * Maximum time for each download request, in milliseconds
    *
    * @default 30000
    */
@@ -73,7 +70,7 @@ export interface DownloadOptions {
   segmentTimeoutInMs?: number
 
   /**
-   * Weather to skip downloading the cache entry.
+   * Whether to skip downloading the cache entry.
    * If lookupOnly is set to true, the restore function will only check if
    * a matching cache entry exists and return the cache key if it does.
    *
@@ -90,14 +87,14 @@ export interface DownloadOptions {
 export function getUploadOptions(copy?: UploadOptions): UploadOptions {
   // Defaults if not overriden
   const result: UploadOptions = {
-    useAzureSdk: false,
     uploadConcurrency: 4,
-    uploadChunkSize: 32 * 1024 * 1024
+    uploadChunkSize: 32 * 1024 * 1024,
+    useS3Client: true
   }
 
   if (copy) {
-    if (typeof copy.useAzureSdk === 'boolean') {
-      result.useAzureSdk = copy.useAzureSdk
+    if (typeof copy.bucket === 'string') {
+      result.bucket = copy.bucket
     }
 
     if (typeof copy.uploadConcurrency === 'number') {
@@ -106,6 +103,10 @@ export function getUploadOptions(copy?: UploadOptions): UploadOptions {
 
     if (typeof copy.uploadChunkSize === 'number') {
       result.uploadChunkSize = copy.uploadChunkSize
+    }
+
+    if (typeof copy.archiveSizeBytes === 'number') {
+      result.archiveSizeBytes = copy.archiveSizeBytes
     }
   }
 
@@ -128,7 +129,6 @@ export function getUploadOptions(copy?: UploadOptions): UploadOptions {
       )
     : result.uploadChunkSize
 
-  core.debug(`Use Azure SDK: ${result.useAzureSdk}`)
   core.debug(`Upload concurrency: ${result.uploadConcurrency}`)
   core.debug(`Upload chunk size: ${result.uploadChunkSize}`)
 
@@ -142,8 +142,7 @@ export function getUploadOptions(copy?: UploadOptions): UploadOptions {
  */
 export function getDownloadOptions(copy?: DownloadOptions): DownloadOptions {
   const result: DownloadOptions = {
-    useAzureSdk: false,
-    concurrentBlobDownloads: true,
+    useS3Client: true,
     downloadConcurrency: 8,
     timeoutInMs: 30000,
     segmentTimeoutInMs: 600000,
@@ -151,12 +150,12 @@ export function getDownloadOptions(copy?: DownloadOptions): DownloadOptions {
   }
 
   if (copy) {
-    if (typeof copy.useAzureSdk === 'boolean') {
-      result.useAzureSdk = copy.useAzureSdk
+    if (typeof copy.bucket === 'string') {
+      result.bucket = copy.bucket
     }
 
-    if (typeof copy.concurrentBlobDownloads === 'boolean') {
-      result.concurrentBlobDownloads = copy.concurrentBlobDownloads
+    if (typeof copy.useS3Client === 'boolean') {
+      result.useS3Client = copy.useS3Client
     }
 
     if (typeof copy.downloadConcurrency === 'number') {
@@ -185,7 +184,7 @@ export function getDownloadOptions(copy?: DownloadOptions): DownloadOptions {
   ) {
     result.segmentTimeoutInMs = Number(segmentDownloadTimeoutMins) * 60 * 1000
   }
-  core.debug(`Use Azure SDK: ${result.useAzureSdk}`)
+  core.debug(`Use S3 client: ${result.useS3Client}`)
   core.debug(`Download concurrency: ${result.downloadConcurrency}`)
   core.debug(`Request timeout (ms): ${result.timeoutInMs}`)
   core.debug(
