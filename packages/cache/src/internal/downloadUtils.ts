@@ -1,8 +1,6 @@
 import * as core from '@actions/core'
 import {HttpClient, HttpClientResponse} from '@actions/http-client'
-import {BlockBlobClient} from '@azure/storage-blob'
-import {TransferProgressEvent} from '@azure/ms-rest-js'
-import * as buffer from 'buffer'
+import {getS3Client, downloadFromS3, isS3Url} from './s3Utils'
 import * as fs from 'fs'
 import * as stream from 'stream'
 import * as util from 'util'
@@ -11,8 +9,6 @@ import * as utils from './cacheUtils'
 import {SocketTimeout} from './constants'
 import {DownloadOptions} from '../options'
 import {retryHttpClientResponse} from './requestUtils'
-
-import {AbortController} from '@azure/abort-controller'
 
 /**
  * Pipes the body of a HTTP response to a stream
@@ -73,7 +69,7 @@ export class DownloadProgress {
    *
    * @param receivedBytes the number of bytes received
    */
-  setReceivedBytes(receivedBytes: number): void {
+  setReceivedBytes(receivedBytes: number) {
     this.receivedBytes = receivedBytes
   }
 
@@ -123,9 +119,9 @@ export class DownloadProgress {
   /**
    * Returns a function used to handle TransferProgressEvents.
    */
-  onProgress(): (progress: TransferProgressEvent) => void {
-    return (progress: TransferProgressEvent) => {
-      this.setReceivedBytes(progress.loadedBytes)
+  onProgress(): (bytesReceived: number) => void {
+    return (bytesReceived: number) => {
+      this.setReceivedBytes(bytesReceived)
     }
   }
 
@@ -280,7 +276,7 @@ export async function downloadCacheHttpClientConcurrent(
       actives--
       delete activeDownloads[segment.offset]
       bytesDownloaded += segment.count
-      progressFn({loadedBytes: bytesDownloaded})
+      progressFn(bytesDownloaded)
     }
 
     while ((nextDownload = downloads.pop())) {
@@ -376,73 +372,34 @@ export async function downloadCacheStorageSDK(
   archivePath: string,
   options: DownloadOptions
 ): Promise<void> {
-  const client = new BlockBlobClient(archiveLocation, undefined, {
-    retryOptions: {
-      // Override the timeout used when downloading each 4 MB chunk
-      // The default is 2 min / MB, which is way too slow
-      tryTimeoutInMs: options.timeoutInMs
-    }
-  })
+  if (!isS3Url(archiveLocation)) {
+    core.debug('URL is not an S3 URL, falling back to http-client download...')
+    return downloadCacheHttpClient(archiveLocation, archivePath)
+  }
 
-  const properties = await client.getProperties()
-  const contentLength = properties.contentLength ?? -1
+  const s3Client = getS3Client()
+  let downloadProgress: DownloadProgress | undefined
 
-  if (contentLength < 0) {
-    // We should never hit this condition, but just in case fall back to downloading the
-    // file as one large stream
-    core.debug(
-      'Unable to determine content length, downloading file with http-client...'
-    )
+  try {
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('Download timed out'))
+      }, options.timeoutInMs)
+    })
 
-    await downloadCacheHttpClient(archiveLocation, archivePath)
-  } else {
-    // Use downloadToBuffer for faster downloads, since internally it splits the
-    // file into 4 MB chunks which can then be parallelized and retried independently
-    //
-    // If the file exceeds the buffer maximum length (~1 GB on 32-bit systems and ~2 GB
-    // on 64-bit systems), split the download into multiple segments
-    // ~2 GB = 2147483647, beyond this, we start getting out of range error. So, capping it accordingly.
-
-    // Updated segment size to 128MB = 134217728 bytes, to complete a segment faster and fail fast
-    const maxSegmentSize = Math.min(134217728, buffer.constants.MAX_LENGTH)
-    const downloadProgress = new DownloadProgress(contentLength)
-
-    const fd = fs.openSync(archivePath, 'w')
-
-    try {
-      downloadProgress.startDisplayTimer()
-      const controller = new AbortController()
-      const abortSignal = controller.signal
-      while (!downloadProgress.isDone()) {
-        const segmentStart =
-          downloadProgress.segmentOffset + downloadProgress.segmentSize
-
-        const segmentSize = Math.min(
-          maxSegmentSize,
-          contentLength - segmentStart
-        )
-
-        downloadProgress.nextSegment(segmentSize)
-        const result = await promiseWithTimeout(
-          options.segmentTimeoutInMs || 3600000,
-          client.downloadToBuffer(segmentStart, segmentSize, {
-            abortSignal,
-            concurrency: options.downloadConcurrency,
-            onProgress: downloadProgress.onProgress()
-          })
-        )
-        if (result === 'timeout') {
-          controller.abort()
-          throw new Error(
-            'Aborting cache download as the download time exceeded the timeout.'
-          )
-        } else if (Buffer.isBuffer(result)) {
-          fs.writeFileSync(fd, result)
-        }
+    const downloadPromise = downloadFromS3(s3Client, archiveLocation, archivePath, bytes => {
+      if (!downloadProgress) {
+        // Initialize progress tracking on first progress event
+        downloadProgress = new DownloadProgress(bytes)
+        downloadProgress.startDisplayTimer()
       }
-    } finally {
+      downloadProgress.setReceivedBytes(bytes)
+    })
+
+    await Promise.race([downloadPromise, timeoutPromise])
+  } finally {
+    if (downloadProgress) {
       downloadProgress.stopDisplayTimer()
-      fs.closeSync(fd)
     }
   }
 }

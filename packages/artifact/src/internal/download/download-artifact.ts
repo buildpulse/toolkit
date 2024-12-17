@@ -1,12 +1,14 @@
 import fs from 'fs/promises'
 import * as github from '@actions/github'
 import * as core from '@actions/core'
+import {S3Client, GetObjectCommand} from '@aws-sdk/client-s3'
 import * as httpClient from '@actions/http-client'
 import unzip from 'unzip-stream'
 import {
   DownloadArtifactOptions,
   DownloadArtifactResponse
 } from '../shared/interfaces'
+import {Readable} from 'stream'
 import {getUserAgentString} from '../shared/user-agent'
 import {getGitHubWorkspaceDir} from '../shared/config'
 import {internalArtifactTwirpClient} from '../shared/artifact-twirp-client'
@@ -37,6 +39,45 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+function isS3Url(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    return parsed.hostname.endsWith('.amazonaws.com')
+  } catch {
+    return false
+  }
+}
+
+async function downloadFromS3(url: string): Promise<Readable> {
+  const s3Client = new S3Client({
+    region: process.env.AWS_REGION || 'us-east-1',
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+      sessionToken: process.env.AWS_SESSION_TOKEN
+    }
+  })
+
+  try {
+    // Parse S3 URL to get bucket and key
+    const s3Url = new URL(url)
+    const bucket = s3Url.hostname.split('.')[0]
+    const key = s3Url.pathname.substring(1)
+
+    const response = await s3Client.send(
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key
+      })
+    )
+
+    return response.Body as Readable
+  } catch (error) {
+    core.error(`S3 download failed: ${error.message}`)
+    throw error
+  }
+}
+
 async function streamExtract(url: string, directory: string): Promise<void> {
   let retryCount = 0
   while (retryCount < 5) {
@@ -60,13 +101,24 @@ export async function streamExtractExternal(
   url: string,
   directory: string
 ): Promise<void> {
-  const client = new httpClient.HttpClient(getUserAgentString())
-  const response = await client.get(url)
-  if (response.message.statusCode !== 200) {
-    throw new Error(
-      `Unexpected HTTP response from blob storage: ${response.message.statusCode} ${response.message.statusMessage}`
-    )
+  let downloadStream: Readable
+
+  if (isS3Url(url)) {
+    core.debug('Using S3 client for artifact download')
+    downloadStream = await downloadFromS3(url)
+  } else {
+    core.debug('Using HTTP client for artifact download')
+    const client = new httpClient.HttpClient(getUserAgentString())
+    const response = await client.get(url)
+    if (response.message.statusCode !== 200) {
+      throw new Error(
+        `Unexpected HTTP response from blob storage: ${response.message.statusCode} ${response.message.statusMessage}`
+      )
+    }
+    downloadStream = response.message
   }
+
+  core.debug('Starting artifact extraction')
 
   const timeout = 30 * 1000 // 30 seconds
 
@@ -78,7 +130,7 @@ export async function streamExtractExternal(
     }
     const timer = setTimeout(timerFn, timeout)
 
-    response.message
+    downloadStream
       .on('data', () => {
         timer.refresh()
       })

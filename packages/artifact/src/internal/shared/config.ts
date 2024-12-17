@@ -1,5 +1,12 @@
 import os from 'os'
 
+interface AwsCredentials {
+  accessKeyId: string
+  secretAccessKey: string
+  sessionToken?: string
+}
+
+
 // Used for controlling the highWaterMark value of the zip that is being streamed
 // The same value is used as the chunk size that is use during upload to blob storage
 export function getUploadChunkSize(): number {
@@ -60,4 +67,43 @@ export function getConcurrency(): number {
 
 export function getUploadChunkTimeout(): number {
   return 300_000 // 5 minutes
+}
+
+/**
+ * Gets AWS credentials from environment variables
+ * @returns AWS credentials object containing access key ID and secret access key
+ * @throws Error if required credentials are not set
+ */
+export function getAwsCredentials(): AwsCredentials {
+  const accessKeyId = process.env.AWS_ACCESS_KEY_ID
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY
+  const sessionToken = process.env.AWS_SESSION_TOKEN
+
+  if (!accessKeyId || !secretAccessKey) {
+    throw new Error(
+      'Required AWS credentials not found. Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set'
+    )
+  }
+
+  return {
+    accessKeyId,
+    secretAccessKey,
+    sessionToken
+  }
+}
+
+/**
+ * Gets AWS region from environment variable with fallback
+ * @returns AWS region string
+ */
+export function getAwsRegion(): string {
+  return process.env.AWS_REGION || 'us-east-1'
+}
+
+/**
+ * Gets optional custom AWS endpoint URL
+ * @returns AWS endpoint URL if set, undefined otherwise
+ */
+export function getAwsEndpoint(): string | undefined {
+  return process.env.AWS_ENDPOINT_URL
 }
