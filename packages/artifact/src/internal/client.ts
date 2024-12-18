@@ -12,16 +12,10 @@ import {
   DeleteArtifactResponse
 } from './shared/interfaces'
 import {uploadArtifact} from './upload/upload-artifact'
-import {
-  downloadArtifactPublic,
-  downloadArtifactInternal
-} from './download/download-artifact'
-import {
-  deleteArtifactPublic,
-  deleteArtifactInternal
-} from './delete/delete-artifact'
-import {getArtifactPublic, getArtifactInternal} from './find/get-artifact'
-import {listArtifactsPublic, listArtifactsInternal} from './find/list-artifacts'
+import {downloadArtifact} from './download/download-artifact'
+import {deleteArtifact} from './delete/delete-artifact'
+import {getArtifact} from './find/get-artifact'
+import {listArtifacts} from './find/list-artifacts'
 import {GHESNotSupportedError} from './shared/errors'
 
 /**
@@ -144,22 +138,7 @@ If the error persists, please check whether Actions is operating normally at [ht
         throw new GHESNotSupportedError()
       }
 
-      if (options?.findBy) {
-        const {
-          findBy: {repositoryOwner, repositoryName, token},
-          ...downloadOptions
-        } = options
-
-        return downloadArtifactPublic(
-          artifactId,
-          repositoryOwner,
-          repositoryName,
-          token,
-          downloadOptions
-        )
-      }
-
-      return downloadArtifactInternal(artifactId, options)
+      return downloadArtifact(artifactId, options)
     } catch (error) {
       warning(
         `Download Artifact failed with error: ${error}.
@@ -181,21 +160,7 @@ If the error persists, please check whether Actions and API requests are operati
         throw new GHESNotSupportedError()
       }
 
-      if (options?.findBy) {
-        const {
-          findBy: {workflowRunId, repositoryOwner, repositoryName, token}
-        } = options
-
-        return listArtifactsPublic(
-          workflowRunId,
-          repositoryOwner,
-          repositoryName,
-          token,
-          options?.latest
-        )
-      }
-
-      return listArtifactsInternal(options?.latest)
+      return listArtifacts(options?.latest)
     } catch (error: unknown) {
       warning(
         `Listing Artifacts failed with error: ${error}.
@@ -218,21 +183,7 @@ If the error persists, please check whether Actions and API requests are operati
         throw new GHESNotSupportedError()
       }
 
-      if (options?.findBy) {
-        const {
-          findBy: {workflowRunId, repositoryOwner, repositoryName, token}
-        } = options
-
-        return getArtifactPublic(
-          artifactName,
-          workflowRunId,
-          repositoryOwner,
-          repositoryName,
-          token
-        )
-      }
-
-      return getArtifactInternal(artifactName)
+      return getArtifact(artifactName)
     } catch (error: unknown) {
       warning(
         `Get Artifact failed with error: ${error}.
@@ -254,21 +205,7 @@ If the error persists, please check whether Actions and API requests are operati
         throw new GHESNotSupportedError()
       }
 
-      if (options?.findBy) {
-        const {
-          findBy: {repositoryOwner, repositoryName, workflowRunId, token}
-        } = options
-
-        return deleteArtifactPublic(
-          artifactName,
-          workflowRunId,
-          repositoryOwner,
-          repositoryName,
-          token
-        )
-      }
-
-      return deleteArtifactInternal(artifactName)
+      return deleteArtifact(artifactName)
     } catch (error) {
       warning(
         `Delete Artifact failed with error: ${error}.

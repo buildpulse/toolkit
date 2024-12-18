@@ -91,36 +91,7 @@ export async function streamExtractExternal(
   })
 }
 
-export async function downloadArtifactPublic(
-  artifactId: number,
-  repositoryOwner: string,
-  repositoryName: string,
-  token: string,
-  options?: DownloadArtifactOptions
-): Promise<DownloadArtifactResponse> {
-  const downloadPath = await resolveOrCreateDirectory(options?.path)
-  const s3Manager = S3ArtifactManager.fromEnvironment()
-
-  console.info(
-    `Downloading artifact '${artifactId}' from '${repositoryOwner}/${repositoryName}'`
-  )
-
-  try {
-    const signedUrl = await s3Manager.getSignedDownloadUrl(artifactId.toString())
-
-    console.info(
-      `Starting download of artifact to: ${downloadPath}`
-    )
-    await streamExtract(signedUrl, downloadPath)
-    console.info(`Artifact download completed successfully.`)
-  } catch (error) {
-    throw new Error(`Unable to download and extract artifact: ${error.message}`)
-  }
-
-  return {downloadPath}
-}
-
-export async function downloadArtifactInternal(
+export async function downloadArtifact(
   artifactId: number,
   options?: DownloadArtifactOptions
 ): Promise<DownloadArtifactResponse> {

@@ -1,239 +1,89 @@
-import * as github from '@actions/github'
-import type {RequestInterface} from '@octokit/types'
-import {
-  getArtifactInternal,
-  getArtifactPublic
-} from '../src/internal/find/get-artifact'
-import * as config from '../src/internal/shared/config'
-import {ArtifactServiceClientJSON, Timestamp} from '../src/generated'
+import {getArtifact} from '../src/internal/find/get-artifact'
+import {S3ArtifactManager} from '../src/internal/s3/artifact-manager'
 import * as util from '../src/internal/shared/util'
 import {noopLogs} from './common'
 import {
   ArtifactNotFoundError,
   InvalidResponseError
 } from '../src/internal/shared/errors'
+import {Artifact} from '../src/internal/shared/interfaces'
 
-type MockedRequest = jest.MockedFunction<RequestInterface<object>>
-
-jest.mock('@actions/github', () => ({
-  getOctokit: jest.fn().mockReturnValue({
-    request: jest.fn()
-  })
-}))
+jest.mock('../src/internal/s3/artifact-manager')
+jest.mock('../src/internal/shared/util')
 
 const fixtures = {
-  repo: 'toolkit',
-  owner: 'actions',
-  token: 'ghp_1234567890',
-  runId: 123,
-  backendIds: {
-    workflowRunBackendId: 'c4d7c21f-ba3f-4ddc-a8c8-6f2f626f8422',
-    workflowJobRunBackendId: '760803a1-f890-4d25-9a6e-a3fc01a0c7cf'
-  },
+  artifactName: 'test-artifact',
   artifacts: [
     {
       id: 1,
-      name: 'my-artifact',
+      name: 'test-artifact',
       size: 456,
       createdAt: new Date('2023-12-01')
     },
     {
       id: 2,
-      name: 'my-artifact',
-      size: 456,
+      name: 'test-artifact',
+      size: 789,
       createdAt: new Date('2023-12-02')
     }
-  ]
+  ] as Artifact[]
 }
 
 describe('get-artifact', () => {
+  let mockS3ArtifactManager: jest.Mocked<S3ArtifactManager>
+
   beforeAll(() => {
     noopLogs()
   })
 
-  describe('public', () => {
-    it('should return the artifact if it is found', async () => {
-      const mockRequest = github.getOctokit(fixtures.token)
-        .request as MockedRequest
-      mockRequest.mockResolvedValueOnce({
-        status: 200,
-        headers: {},
-        url: '',
-        data: {
-          artifacts: [
-            {
-              name: fixtures.artifacts[0].name,
-              id: fixtures.artifacts[0].id,
-              size_in_bytes: fixtures.artifacts[0].size,
-              created_at: fixtures.artifacts[0].createdAt.toISOString()
-            }
-          ]
-        }
-      })
-
-      const response = await getArtifactPublic(
-        fixtures.artifacts[0].name,
-        fixtures.runId,
-        fixtures.owner,
-        fixtures.repo,
-        fixtures.token
-      )
-
-      expect(response).toEqual({
-        artifact: fixtures.artifacts[0]
-      })
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockS3ArtifactManager = jest.mocked(new S3ArtifactManager({} as any))
+    mockS3ArtifactManager.getArtifact.mockResolvedValue(fixtures.artifacts[0])
+    mockS3ArtifactManager.listArtifacts.mockResolvedValue([fixtures.artifacts[0]])
+    mockS3ArtifactManager.createArtifact.mockResolvedValue({
+      uploadUrl: 'https://example.com',
+      artifactId: 1
     })
-
-    it('should return the latest artifact if multiple are found', async () => {
-      const mockRequest = github.getOctokit(fixtures.token)
-        .request as MockedRequest
-      mockRequest.mockResolvedValueOnce({
-        status: 200,
-        headers: {},
-        url: '',
-        data: {
-          artifacts: fixtures.artifacts.map(artifact => ({
-            name: artifact.name,
-            id: artifact.id,
-            size_in_bytes: artifact.size,
-            created_at: artifact.createdAt.toISOString()
-          }))
-        }
-      })
-
-      const response = await getArtifactPublic(
-        fixtures.artifacts[0].name,
-        fixtures.runId,
-        fixtures.owner,
-        fixtures.repo,
-        fixtures.token
-      )
-
-      expect(response).toEqual({
-        artifact: fixtures.artifacts[1]
-      })
+    mockS3ArtifactManager.deleteArtifact.mockResolvedValue({id: 1})
+    mockS3ArtifactManager.uploadArtifact.mockResolvedValue({
+      uploadSize: 100,
+      sha256Hash: 'hash'
     })
+    mockS3ArtifactManager.finalizeArtifact.mockResolvedValue()
+    mockS3ArtifactManager.getSignedDownloadUrl.mockResolvedValue('https://example.com')
+    jest.spyOn(util, 'getArtifactManager').mockReturnValue(mockS3ArtifactManager)
+  })
 
-    it('should fail if no artifacts are found', async () => {
-      const mockRequest = github.getOctokit(fixtures.token)
-        .request as MockedRequest
-      mockRequest.mockResolvedValueOnce({
-        status: 200,
-        headers: {},
-        url: '',
-        data: {
-          artifacts: []
-        }
-      })
-
-      const response = getArtifactPublic(
-        fixtures.artifacts[0].name,
-        fixtures.runId,
-        fixtures.owner,
-        fixtures.repo,
-        fixtures.token
-      )
-
-      expect(response).rejects.toThrowError(ArtifactNotFoundError)
-    })
-
-    it('should fail if non-200 response', async () => {
-      const mockRequest = github.getOctokit(fixtures.token)
-        .request as MockedRequest
-      mockRequest.mockResolvedValueOnce({
-        status: 404,
-        headers: {},
-        url: '',
-        data: {}
-      })
-
-      const response = getArtifactPublic(
-        fixtures.artifacts[0].name,
-        fixtures.runId,
-        fixtures.owner,
-        fixtures.repo,
-        fixtures.token
-      )
-
-      expect(response).rejects.toThrowError(InvalidResponseError)
+  it('should return the artifact if it is found', async () => {
+    const response = await getArtifact(fixtures.artifactName)
+    expect(response).toEqual({
+      artifact: fixtures.artifacts[0]
     })
   })
 
-  describe('internal', () => {
-    beforeEach(() => {
-      jest.spyOn(config, 'getRuntimeToken').mockReturnValue('test-token')
+  it('should fail if no artifacts are found', async () => {
+    mockS3ArtifactManager.getArtifact.mockRejectedValue(
+      new ArtifactNotFoundError('Not found')
+    )
 
-      jest
-        .spyOn(util, 'getBackendIdsFromToken')
-        .mockReturnValue(fixtures.backendIds)
+    await expect(getArtifact(fixtures.artifactName, {failIfNotFound: true})).rejects.toThrow(
+      ArtifactNotFoundError
+    )
+  })
 
-      jest
-        .spyOn(config, 'getResultsServiceUrl')
-        .mockReturnValue('https://results.local')
-    })
+  it('should fail if S3 returns an error', async () => {
+    const error = new Error('S3 error')
+    mockS3ArtifactManager.getArtifact.mockRejectedValue(error)
 
-    it('should return the artifact if it is found', async () => {
-      jest
-        .spyOn(ArtifactServiceClientJSON.prototype, 'ListArtifacts')
-        .mockResolvedValue({
-          artifacts: [
-            {
-              ...fixtures.backendIds,
-              databaseId: fixtures.artifacts[0].id.toString(),
-              name: fixtures.artifacts[0].name,
-              size: fixtures.artifacts[0].size.toString(),
-              createdAt: Timestamp.fromDate(fixtures.artifacts[0].createdAt)
-            }
-          ]
-        })
+    await expect(getArtifact(fixtures.artifactName)).rejects.toThrow(ArtifactNotFoundError)
+  })
 
-      const response = await getArtifactInternal(fixtures.artifacts[0].name)
+  it('should fail with InvalidResponseError for malformed responses', async () => {
+    mockS3ArtifactManager.getArtifact.mockRejectedValue(
+      new InvalidResponseError('Invalid response')
+    )
 
-      expect(response).toEqual({
-        artifact: fixtures.artifacts[0]
-      })
-    })
-
-    it('should return the latest artifact if multiple are found', async () => {
-      jest
-        .spyOn(ArtifactServiceClientJSON.prototype, 'ListArtifacts')
-        .mockResolvedValue({
-          artifacts: fixtures.artifacts.map(artifact => ({
-            ...fixtures.backendIds,
-            databaseId: artifact.id.toString(),
-            name: artifact.name,
-            size: artifact.size.toString(),
-            createdAt: Timestamp.fromDate(artifact.createdAt)
-          }))
-        })
-
-      const response = await getArtifactInternal(fixtures.artifacts[0].name)
-
-      expect(response).toEqual({
-        artifact: fixtures.artifacts[1]
-      })
-    })
-
-    it('should fail if no artifacts are found', async () => {
-      jest
-        .spyOn(ArtifactServiceClientJSON.prototype, 'ListArtifacts')
-        .mockResolvedValue({
-          artifacts: []
-        })
-
-      const response = getArtifactInternal(fixtures.artifacts[0].name)
-
-      expect(response).rejects.toThrowError(ArtifactNotFoundError)
-    })
-
-    it('should fail if non-200 response', async () => {
-      jest
-        .spyOn(ArtifactServiceClientJSON.prototype, 'ListArtifacts')
-        .mockRejectedValue(new Error('boom'))
-
-      const response = getArtifactInternal(fixtures.artifacts[0].name)
-
-      expect(response).rejects.toThrow()
-    })
+    await expect(getArtifact(fixtures.artifactName)).rejects.toThrow(ArtifactNotFoundError)
   })
 })

@@ -1,23 +1,22 @@
 /**
- * Returns a Date object for when the artifact should expire based on the retention days.
- * Returns undefined if the retention days is undefined or not a valid number between 1 and 90.
- * @param retentionDays number of days to retain the artifact
+ * Returns the number of days to retain the artifact.
+ * Returns undefined if no retention days are specified.
+ * Throws an error if the retention days is not a valid number between 1 and 90.
  */
-export function getExpiration(retentionDays?: number): Date | undefined {
+export function getRetentionDays(): number | undefined {
+  const retentionDays = process.env['INPUT_RETENTION-DAYS']
   if (!retentionDays) {
     return undefined
   }
 
-  const retentionDaysInt = parseInt(retentionDays.toString())
+  const retentionDaysInt = parseInt(retentionDays)
   if (
     Number.isNaN(retentionDaysInt) ||
     retentionDaysInt < 1 ||
     retentionDaysInt > 90
   ) {
-    return undefined
+    throw new Error('Retention days must be a number between 1 and 90')
   }
 
-  const expirationDate = new Date()
-  expirationDate.setDate(expirationDate.getDate() + retentionDaysInt)
-  return expirationDate
+  return retentionDaysInt
 }

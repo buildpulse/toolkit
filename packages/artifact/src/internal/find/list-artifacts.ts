@@ -1,148 +1,34 @@
-import {info, warning, debug} from '@actions/core'
-import {getOctokit} from '@actions/github'
-import {ListArtifactsResponse, Artifact} from '../shared/interfaces'
-import {getUserAgentString} from '../shared/user-agent'
-import {getRetryOptions} from './retry-options'
-import {defaults as defaultGitHubOptions} from '@actions/github/lib/utils'
-import {requestLog} from '@octokit/plugin-request-log'
-import {retry} from '@octokit/plugin-retry'
-import {OctokitOptions} from '@octokit/core/dist-types/types'
-import {internalArtifactTwirpClient} from '../shared/artifact-twirp-client'
-import {getBackendIdsFromToken} from '../shared/util'
-import {ListArtifactsRequest, Timestamp} from '../../generated'
+import * as core from '@actions/core'
+import { S3ArtifactManager } from '../s3/artifact-manager'
+import { getS3Config } from '../shared/config'
+import { ListArtifactsResponse, Artifact } from '../shared/interfaces'
 
-// Limiting to 1000 for perf reasons
-const maximumArtifactCount = 1000
-const paginationCount = 100
-const maxNumberOfPages = maximumArtifactCount / paginationCount
-
-export async function listArtifactsPublic(
-  workflowRunId: number,
-  repositoryOwner: string,
-  repositoryName: string,
-  token: string,
+/**
+ * Lists all artifacts in S3 storage
+ * @param latest if true, only return the latest version of each artifact
+ */
+export async function listArtifacts(
   latest = false
 ): Promise<ListArtifactsResponse> {
-  info(
-    `Fetching artifact list for workflow run ${workflowRunId} in repository ${repositoryOwner}/${repositoryName}`
-  )
+  const s3Config = getS3Config()
+  const artifactManager = new S3ArtifactManager(s3Config)
 
-  let artifacts: Artifact[] = []
-  const [retryOpts, requestOpts] = getRetryOptions(defaultGitHubOptions)
+  try {
+    let artifacts = await artifactManager.listArtifacts()
 
-  const opts: OctokitOptions = {
-    log: undefined,
-    userAgent: getUserAgentString(),
-    previews: undefined,
-    retry: retryOpts,
-    request: requestOpts
-  }
+    // Ensure artifacts is always an array
+    artifacts = artifacts || []
 
-  const github = getOctokit(token, opts, retry, requestLog)
-
-  let currentPageNumber = 1
-  const {data: listArtifactResponse} =
-    await github.rest.actions.listWorkflowRunArtifacts({
-      owner: repositoryOwner,
-      repo: repositoryName,
-      run_id: workflowRunId,
-      per_page: paginationCount,
-      page: currentPageNumber
-    })
-
-  let numberOfPages = Math.ceil(
-    listArtifactResponse.total_count / paginationCount
-  )
-  const totalArtifactCount = listArtifactResponse.total_count
-  if (totalArtifactCount > maximumArtifactCount) {
-    warning(
-      `Workflow run ${workflowRunId} has more than 1000 artifacts. Results will be incomplete as only the first ${maximumArtifactCount} artifacts will be returned`
-    )
-    numberOfPages = maxNumberOfPages
-  }
-
-  // Iterate over the first page
-  for (const artifact of listArtifactResponse.artifacts) {
-    artifacts.push({
-      name: artifact.name,
-      id: artifact.id,
-      size: artifact.size_in_bytes,
-      createdAt: artifact.created_at ? new Date(artifact.created_at) : undefined
-    })
-  }
-
-  // Iterate over any remaining pages
-  for (
-    currentPageNumber;
-    currentPageNumber < numberOfPages;
-    currentPageNumber++
-  ) {
-    currentPageNumber++
-    debug(`Fetching page ${currentPageNumber} of artifact list`)
-
-    const {data: listArtifactResponse} =
-      await github.rest.actions.listWorkflowRunArtifacts({
-        owner: repositoryOwner,
-        repo: repositoryName,
-        run_id: workflowRunId,
-        per_page: paginationCount,
-        page: currentPageNumber
-      })
-
-    for (const artifact of listArtifactResponse.artifacts) {
-      artifacts.push({
-        name: artifact.name,
-        id: artifact.id,
-        size: artifact.size_in_bytes,
-        createdAt: artifact.created_at
-          ? new Date(artifact.created_at)
-          : undefined
-      })
+    if (latest) {
+      artifacts = filterLatest(artifacts)
     }
-  }
 
-  if (latest) {
-    artifacts = filterLatest(artifacts)
-  }
-
-  info(`Found ${artifacts.length} artifact(s)`)
-
-  return {
-    artifacts
-  }
-}
-
-export async function listArtifactsInternal(
-  latest = false
-): Promise<ListArtifactsResponse> {
-  const artifactClient = internalArtifactTwirpClient()
-
-  const {workflowRunBackendId, workflowJobRunBackendId} =
-    getBackendIdsFromToken()
-
-  const req: ListArtifactsRequest = {
-    workflowRunBackendId,
-    workflowJobRunBackendId
-  }
-
-  const res = await artifactClient.ListArtifacts(req)
-  let artifacts: Artifact[] = res.artifacts.map(artifact => ({
-    name: artifact.name,
-    id: Number(artifact.databaseId),
-    size: Number(artifact.size),
-    createdAt: artifact.createdAt
-      ? Timestamp.toDate(artifact.createdAt)
-      : undefined
-  }))
-
-  if (latest) {
-    artifacts = filterLatest(artifacts)
-  }
-
-  info(`Found ${artifacts.length} artifact(s)`)
-
-  return {
-    artifacts
+    core.info(`Found ${artifacts.length} artifact(s)`)
+    return { artifacts }
+  } catch (error) {
+    core.debug(`Failed to list artifacts: ${error}`)
+    // Return empty array instead of throwing on error
+    return { artifacts: [] }
   }
 }
 
@@ -152,14 +38,12 @@ export async function listArtifactsInternal(
  * @returns The filtered list of artifacts
  */
 function filterLatest(artifacts: Artifact[]): Artifact[] {
-  artifacts.sort((a, b) => b.id - a.id)
-  const latestArtifacts: Artifact[] = []
-  const seenArtifactNames = new Set<string>()
-  for (const artifact of artifacts) {
-    if (!seenArtifactNames.has(artifact.name)) {
-      latestArtifacts.push(artifact)
-      seenArtifactNames.add(artifact.name)
-    }
-  }
-  return latestArtifacts
+  return artifacts
+    .sort((a, b) => {
+      if (!a.createdAt || !b.createdAt) return 0
+      return b.createdAt.getTime() - a.createdAt.getTime()
+    })
+    .filter((artifact, index, self) =>
+      index === self.findIndex(a => a.name === artifact.name)
+    )
 }

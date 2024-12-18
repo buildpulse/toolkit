@@ -3,7 +3,7 @@ import {
   UploadArtifactOptions,
   UploadArtifactResponse
 } from '../shared/interfaces'
-import {getExpiration} from './retention'
+import {getRetentionDays} from './retention'
 import {validateArtifactName} from './path-and-artifact-name-validation'
 import {S3ArtifactManager} from '../s3/artifact-manager'
 import {
@@ -38,8 +38,12 @@ export async function uploadArtifact(
   const s3Config = getS3Config()
   const artifactManager = new S3ArtifactManager(s3Config)
 
+  // Get retention days from options or environment
+  const retentionDays = options?.retentionDays || getRetentionDays()
+  core.debug(`Retention days: ${retentionDays}`)
+
   // Create the artifact and get upload URL
-  const {uploadUrl, key} = await artifactManager.createArtifact(name)
+  const {uploadUrl, artifactId} = await artifactManager.createArtifact(name)
 
   // Create zip stream for upload
   const zipUploadStream = await createZipUploadStream(
@@ -49,25 +53,19 @@ export async function uploadArtifact(
 
   // Upload zip to S3
   const uploadResult = await artifactManager.uploadArtifact(
-    uploadUrl,
+    `artifacts/${artifactId}/${name}`,
     zipUploadStream
   )
 
-  // Finalize the artifact with metadata
-  const metadata = {
-    name,
-    size: uploadResult.uploadSize || 0,
-    hash: uploadResult.sha256Hash ? `sha256:${uploadResult.sha256Hash}` : undefined
-  }
-
-  const finalizedArtifact = await artifactManager.finalizeArtifact(key, metadata)
+  // Finalize the artifact
+  await artifactManager.finalizeArtifact(`artifacts/${artifactId}/${name}`)
 
   core.info(
-    `Artifact ${name}.zip successfully uploaded to S3. Key: ${finalizedArtifact.key}`
+    `Artifact ${name} successfully uploaded to S3. ID: ${artifactId}`
   )
 
   return {
     size: uploadResult.uploadSize,
-    id: Date.now() // Use timestamp as ID since we no longer have GitHub artifact IDs
+    id: artifactId
   }
 }

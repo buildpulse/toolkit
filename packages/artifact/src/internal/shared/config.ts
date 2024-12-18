@@ -1,5 +1,6 @@
 import os from 'os'
 import {S3ClientConfig} from '@aws-sdk/client-s3'
+import {S3Config} from '../s3/artifact-manager'
 
 // Used for controlling the highWaterMark value of the zip that is being streamed
 // The same value is used as the chunk size that is use during upload to blob storage
@@ -7,7 +8,7 @@ export function getUploadChunkSize(): number {
   return 8 * 1024 * 1024 // 8 MB Chunks
 }
 
-export function getS3Config(): S3ClientConfig {
+export function getS3Config(): S3Config {
   const region = process.env['AWS_REGION'] || 'us-east-1'
   const endpoint = process.env['AWS_ENDPOINT_URL']
   const bucket = process.env['AWS_ARTIFACT_BUCKET']
@@ -16,8 +17,9 @@ export function getS3Config(): S3ClientConfig {
     throw new Error('AWS_ARTIFACT_BUCKET environment variable is not set')
   }
 
-  const config: S3ClientConfig = {
+  const config: S3Config = {
     region,
+    bucket,
     ...(endpoint && {endpoint})
   }
 

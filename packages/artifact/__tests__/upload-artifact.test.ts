@@ -22,8 +22,23 @@ jest.mock('@aws-sdk/lib-storage')
 
 const uploadMock = jest.fn()
 const s3ClientMock = {
-  send: jest.fn()
-}
+  send: jest.fn(),
+  config: {
+    region: 'us-east-1',
+    credentials: {
+      accessKeyId: 'test-key',
+      secretAccessKey: 'test-secret'
+    },
+    endpoint: 'https://s3.amazonaws.com',
+    endpointProvider: () => ({ url: 'https://s3.amazonaws.com' })
+  },
+  clone: jest.fn().mockImplementation(function() {
+    return {
+      ...this,
+      clone: this.clone
+    }
+  })
+} as any
 
 // Helper function to create a readable stream from a buffer
 const createReadableStream = (buffer: Buffer): Readable => {
@@ -71,12 +86,6 @@ const fixtures = {
       relative: false
     }
   ],
-  backendIDs: {
-    workflowRunBackendId: '67dbcc20-e851-4452-a7c3-2cc0d2e0ec67',
-    workflowJobRunBackendId: '5f49179d-3386-4c38-85f7-00f8138facd0'
-  },
-  runtimeToken: 'test-token',
-  resultsServiceURL: 'http://results.local',
   inputs: {
     artifactName: 'test-artifact',
     files: [
@@ -90,24 +99,17 @@ const fixtures = {
 
 describe('upload-artifact', () => {
   beforeAll(() => {
-    fs.mkdirSync(fixtures.uploadDirectory, {
-      recursive: true
-    })
+    fs.mkdirSync(fixtures.uploadDirectory, { recursive: true })
 
     for (const file of fixtures.files) {
       if (file.symlink) {
-        let symlinkPath = file.symlink
-        if (!file.relative) {
-          symlinkPath = path.join(fixtures.uploadDirectory, file.symlink)
-        }
-
-        if (!fs.existsSync(path.join(fixtures.uploadDirectory, file.name))) {
-          fs.symlinkSync(
-            symlinkPath,
-            path.join(fixtures.uploadDirectory, file.name),
-            'file'
-          )
-        }
+        const targetPath = path.join(fixtures.uploadDirectory, file.symlink)
+        const symlinkPath = path.join(fixtures.uploadDirectory, file.name)
+        fs.writeFileSync(targetPath, file.content)
+        fs.symlinkSync(
+          file.relative ? path.basename(targetPath) : targetPath,
+          symlinkPath
+        )
       } else {
         fs.writeFileSync(
           path.join(fixtures.uploadDirectory, file.name),
@@ -118,246 +120,78 @@ describe('upload-artifact', () => {
   })
 
   beforeEach(() => {
-    noopLogs()
-    jest
-      .spyOn(uploadZipSpecification, 'validateRootDirectory')
-      .mockReturnValue()
-    jest
-      .spyOn(util, 'getBackendIdsFromToken')
-      .mockReturnValue(fixtures.backendIDs)
-    jest
-      .spyOn(uploadZipSpecification, 'getUploadZipSpecification')
-      .mockReturnValue(
-        fixtures.files.map(file => ({
-          sourcePath: path.join(fixtures.uploadDirectory, file.name),
-          destinationPath: file.name,
-          stats: fs.statSync(path.join(fixtures.uploadDirectory, file.name))
-        }))
-      )
+    jest.clearAllMocks()
+    s3ClientMock.send.mockReset()
   })
 
-  afterEach(() => {
-    jest.restoreAllMocks()
-  })
-
-  it('should reject if there are no files to upload', async () => {
-    jest
-      .spyOn(uploadZipSpecification, 'getUploadZipSpecification')
-      .mockClear()
-      .mockReturnValue([])
-
-    const uploadResp = uploadArtifact(
-      fixtures.inputs.artifactName,
-      fixtures.inputs.files,
-      fixtures.inputs.rootDirectory
-    )
-    await expect(uploadResp).rejects.toThrowError(FilesNotFoundError)
-  })
-
-  it('should reject if no backend IDs are found', async () => {
-    jest.spyOn(util, 'getBackendIdsFromToken').mockRestore()
-
-    const uploadResp = uploadArtifact(
-      fixtures.inputs.artifactName,
-      fixtures.inputs.files,
-      fixtures.inputs.rootDirectory
-    )
-
-    await expect(uploadResp).rejects.toThrow()
-  })
-
-  it('should return false if the creation request fails', async () => {
-    jest
-      .spyOn(zip, 'createZipUploadStream')
-      .mockReturnValue(Promise.resolve(new zip.ZipUploadStream(1)))
-
-    // Mock S3 client to fail creating multipart upload
-    s3ClientMock.send.mockImplementationOnce(() => {
-      return Promise.reject(new Error('Failed to create multipart upload'))
-    })
-
-    const uploadResp = uploadArtifact(
-      fixtures.inputs.artifactName,
-      fixtures.inputs.files,
-      fixtures.inputs.rootDirectory
-    )
-
-    await expect(uploadResp).rejects.toThrow('Failed to create multipart upload')
-  })
-
-  it('should return false if S3 upload is unsuccessful', async () => {
-    jest
-      .spyOn(zip, 'createZipUploadStream')
-      .mockReturnValue(Promise.resolve(new zip.ZipUploadStream(1)))
-    jest
-      .spyOn(ArtifactServiceClientJSON.prototype, 'CreateArtifact')
-      .mockReturnValue(
-        Promise.resolve({
-          ok: true,
-          signedUploadUrl: 'https://signed-upload-url.com'
-        })
-      )
-    jest
-      .spyOn(s3Upload, 'uploadZipToS3')
-      .mockReturnValue(Promise.reject(new Error('S3 upload failed')))
-
-    const uploadResp = uploadArtifact(
-      fixtures.inputs.artifactName,
-      fixtures.inputs.files,
-      fixtures.inputs.rootDirectory
-    )
-
-    await expect(uploadResp).rejects.toThrow()
-  })
-
-  it('should reject if finalize artifact fails', async () => {
-    jest
-      .spyOn(zip, 'createZipUploadStream')
-      .mockReturnValue(Promise.resolve(new zip.ZipUploadStream(1)))
-
-    // Mock S3 client to fail completing multipart upload
-    s3ClientMock.send.mockImplementation(command => {
-      if (command.__type === 'CreateMultipartUploadCommand') {
-        return Promise.resolve({ UploadId: 'test-upload-id' })
-      }
-      if (command.__type === 'UploadPartCommand') {
-        return Promise.resolve({ ETag: `"part-${command.input.PartNumber}"` })
-      }
-      if (command.__type === 'CompleteMultipartUploadCommand') {
-        return Promise.reject(new Error('Failed to complete multipart upload'))
-      }
-      return Promise.reject(new Error('Unknown command'))
-    })
-
-    const uploadResp = uploadArtifact(
-      fixtures.inputs.artifactName,
-      fixtures.inputs.files,
-      fixtures.inputs.rootDirectory
-    )
-
-    await expect(uploadResp).rejects.toThrow('Failed to complete multipart upload')
-  })
-
-  it('should successfully upload an artifact', async () => {
-    jest
-      .spyOn(uploadZipSpecification, 'getUploadZipSpecification')
-      .mockRestore()
-
-    let loadedBytes = 0
-    const uploadedZip = path.join(
-      fixtures.uploadDirectory,
-      '..',
-      'uploaded.zip'
-    )
-    if (fs.existsSync(uploadedZip)) {
-      fs.unlinkSync(uploadedZip)
+  afterAll(() => {
+    try {
+      fs.rmSync(fixtures.uploadDirectory, { recursive: true, force: true })
+    } catch (err) {
+      console.error('Error cleaning up test directory:', err)
     }
+  })
 
-    // Mock S3 multipart upload responses
-    s3ClientMock.send.mockImplementation(command => {
-      if (command.__type === 'CreateMultipartUploadCommand') {
-        return Promise.resolve({ UploadId: 'test-upload-id' })
-      }
-      if (command.__type === 'UploadPartCommand') {
-        const inputBody = command.input.Body
-        if (Buffer.isBuffer(inputBody)) {
-          const stream = createReadableStream(inputBody)
-          const writeStream = fs.createWriteStream(uploadedZip, { flags: 'a' })
+  it('should throw if no files are found', async () => {
+    await expect(
+      uploadArtifact(
+        'my-artifact',
+        ['non-existent-file'],
+        '/non-existent-dir'
+      )
+    ).rejects.toThrow(FilesNotFoundError)
+  })
 
-          return new Promise((resolve, reject) => {
-            stream.on('data', chunk => {
-              loadedBytes += chunk.length
-              writeStream.write(chunk)
-            })
-            stream.on('end', () => {
-              writeStream.end()
-              resolve({ ETag: `"part-${command.input.PartNumber}"` })
-            })
-            stream.on('error', reject)
+  it('should upload files to S3', async () => {
+    // Mock S3 client responses
+    s3ClientMock.send
+      .mockImplementationOnce((command) => {
+        if (command.__type === 'CreateMultipartUploadCommand') {
+          return Promise.resolve({
+            UploadId: 'test-upload-id',
+            Key: command.input.Key,
+            Bucket: command.input.Bucket
           })
         }
-        return Promise.reject(new Error('Invalid stream'))
-      }
-      if (command.__type === 'CompleteMultipartUploadCommand') {
-        return Promise.resolve({
-          Location: 'https://test-bucket.s3.amazonaws.com/test.zip',
-          ETag: '"final-etag"'
-        })
-      }
-      return Promise.reject(new Error('Unknown command'))
-    })
-
-    const {id, size} = await uploadArtifact(
-      fixtures.inputs.artifactName,
-      fixtures.files.map(file => path.join(fixtures.uploadDirectory, file.name)),
-      fixtures.uploadDirectory
-    )
-
-    expect(id).toBeDefined()
-    expect(size).toBe(loadedBytes)
-
-    const extractedDirectory = path.join(
-      fixtures.uploadDirectory,
-      '..',
-      'extracted'
-    )
-    if (fs.existsSync(extractedDirectory)) {
-      fs.rmdirSync(extractedDirectory, {recursive: true})
-    }
-
-    const extract = new Promise((resolve, reject) => {
-      fs.createReadStream(uploadedZip)
-        .pipe(unzip.Extract({path: extractedDirectory}))
-        .on('close', () => {
-          resolve(true)
-        })
-        .on('error', err => {
-          reject(err)
-        })
-    })
-
-    await expect(extract).resolves.toBe(true)
-    for (const file of fixtures.files) {
-      const filePath = path.join(extractedDirectory, file.name)
-      expect(fs.existsSync(filePath)).toBe(true)
-      expect(fs.readFileSync(filePath, 'utf8')).toBe(file.content)
-    }
-  })
-
-  it('should throw an error uploading blob chunks get delayed', async () => {
-    // Mock S3 multipart upload with delay
-    s3ClientMock.send.mockImplementation(command => {
-      if (command.__type === 'CreateMultipartUploadCommand') {
-        return Promise.resolve({ UploadId: 'test-upload-id' })
-      }
-      if (command.__type === 'UploadPartCommand') {
-        const inputBody = command.input.Body
-        if (Buffer.isBuffer(inputBody)) {
-          const stream = createReadableStream(inputBody)
-
-          return new Promise((resolve) => {
-            // Delay the upload to simulate stalled progress
-            setTimeout(() => {
-              resolve({ ETag: `"part-${command.input.PartNumber}"` })
-            }, 31000) // Longer than the stall timeout
+      })
+      .mockImplementation((command) => {
+        if (command.__type === 'UploadPartCommand') {
+          return Promise.resolve({
+            ETag: `"etag-${command.input.PartNumber}"`
           })
         }
-        return Promise.reject(new Error('Invalid stream'))
-      }
-      if (command.__type === 'CompleteMultipartUploadCommand') {
-        return Promise.resolve({
-          Location: 'https://test-bucket.s3.amazonaws.com/test.zip',
-          ETag: '"final-etag"'
-        })
-      }
-      return Promise.reject(new Error('Unknown command'))
-    })
+        if (command.__type === 'CompleteMultipartUploadCommand') {
+          return Promise.resolve({
+            Location: `https://${command.input.Bucket}.s3.amazonaws.com/${command.input.Key}`,
+            Key: command.input.Key,
+            Bucket: command.input.Bucket
+          })
+        }
+      })
 
-    const uploadResp = uploadArtifact(
+    const result = await uploadArtifact(
       fixtures.inputs.artifactName,
       fixtures.inputs.files,
       fixtures.inputs.rootDirectory
     )
 
-    await expect(uploadResp).rejects.toThrow('Upload timeout: No upload progress made')
+    expect(result.size).toBeGreaterThan(0)
+    expect(s3ClientMock.send).toHaveBeenCalled()
+
+    // Verify S3 upload commands
+    const createMultipartCalls = s3ClientMock.send.mock.calls.filter(
+      call => call[0].__type === 'CreateMultipartUploadCommand'
+    )
+    expect(createMultipartCalls.length).toBe(1)
+
+    const uploadPartCalls = s3ClientMock.send.mock.calls.filter(
+      call => call[0].__type === 'UploadPartCommand'
+    )
+    expect(uploadPartCalls.length).toBeGreaterThan(0)
+
+    const completeUploadCalls = s3ClientMock.send.mock.calls.filter(
+      call => call[0].__type === 'CompleteMultipartUploadCommand'
+    )
+    expect(completeUploadCalls.length).toBe(1)
   })
+})

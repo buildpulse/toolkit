@@ -3,6 +3,8 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  DeleteObjectCommand,
+  ListObjectsV2Command,
   CreateMultipartUploadCommand,
   CompleteMultipartUploadCommand,
   S3ClientConfig
@@ -10,18 +12,10 @@ import {
 import {getSignedUrl} from '@aws-sdk/s3-request-presigner'
 import * as core from '@actions/core'
 import {v4 as uuidv4} from 'uuid'
-import {S3UploadError} from '../shared/errors'
 import {Readable} from 'stream'
 import {Upload} from '@aws-sdk/lib-storage'
-
-export interface ArtifactMetadata {
-  name: string
-  size: number
-  hash?: string
-  bucket: string
-  key: string
-  expiresAt?: Date
-}
+import {Artifact, DeleteArtifactResponse} from '../shared/interfaces'
+import {ArtifactNotFoundError, S3UploadError} from '../shared/errors'
 
 export type S3Config = S3ClientConfig & {
   bucket: string
@@ -37,36 +31,112 @@ export class S3ArtifactManager {
     this.bucket = bucket
   }
 
-  async createArtifact(name: string): Promise<{uploadUrl: string; key: string}> {
+  async listArtifacts(): Promise<Artifact[]> {
     try {
-      const key = `artifacts/${uuidv4()}/${name}`
-      const command = new PutObjectCommand({
+      const response = await this.s3Client.send(
+        new ListObjectsV2Command({
+          Bucket: this.bucket,
+          Prefix: 'artifacts/'
+        })
+      )
+
+      const artifacts: Artifact[] = []
+      for (const object of response.Contents || []) {
+        if (!object.Key?.endsWith('.metadata.json')) {
+          const name = object.Key?.split('/').pop() || ''
+          artifacts.push({
+            name,
+            id: parseInt(object.Key?.split('/')[1] || '0', 10),
+            size: object.Size || 0,
+            createdAt: object.LastModified
+          })
+        }
+      }
+
+      return artifacts
+    } catch (error) {
+      core.debug(`Failed to list artifacts: ${error}`)
+      return []
+    }
+  }
+
+  async getArtifact(name: string): Promise<Artifact> {
+    try {
+      const response = await this.s3Client.send(
+        new HeadObjectCommand({
+          Bucket: this.bucket,
+          Key: `artifacts/${name}`
+        })
+      )
+
+      if (!response) {
+        throw new ArtifactNotFoundError(`Artifact not found: ${name}`)
+      }
+
+      return {
+        name,
+        id: parseInt(response.Metadata?.['artifact-id'] || '0', 10),
+        size: response.ContentLength || 0,
+        createdAt: response.LastModified
+      }
+    } catch (error) {
+      throw new ArtifactNotFoundError(`Failed to get artifact ${name}: ${error}`)
+    }
+  }
+
+  async deleteArtifact(name: string): Promise<DeleteArtifactResponse> {
+    try {
+      const artifact = await this.getArtifact(name)
+      await this.s3Client.send(
+        new DeleteObjectCommand({
+          Bucket: this.bucket,
+          Key: `artifacts/${name}`
+        })
+      )
+
+      return {
+        id: artifact.id
+      }
+    } catch (error) {
+      throw new ArtifactNotFoundError(`Failed to delete artifact ${name}: ${error}`)
+    }
+  }
+
+  async createArtifact(name: string): Promise<{uploadUrl: string; artifactId: number}> {
+    try {
+      const artifactId = Date.now()
+      const key = `artifacts/${artifactId}/${name}`
+      const command = new CreateMultipartUploadCommand({
         Bucket: this.bucket,
-        Key: key
+        Key: key,
+        Metadata: {
+          'artifact-id': artifactId.toString()
+        }
       })
+
+      const {UploadId} = await this.s3Client.send(command)
+      if (!UploadId) {
+        throw new S3UploadError('Failed to create multipart upload', 'NoUploadId')
+      }
 
       const uploadUrl = await getSignedUrl(this.s3Client, command, {
-        expiresIn: 3600 // URL expires in 1 hour
+        expiresIn: 3600
       })
 
-      core.debug(`Generated presigned URL for artifact upload: ${key}`)
-      return {uploadUrl, key}
+      return {uploadUrl, artifactId}
     } catch (error) {
       throw new S3UploadError(
-        `Failed to create artifact upload URL: ${S3UploadError.getErrorMessage(error)}`,
+        `Failed to create artifact upload: ${error}`,
         error?.code
       )
     }
   }
 
   async uploadArtifact(
-    uploadUrl: string,
+    key: string,
     stream: Readable
   ): Promise<{uploadSize?: number; sha256Hash?: string}> {
     try {
-      const url = new URL(uploadUrl)
-      const key = url.pathname.slice(1) // Remove leading slash
-
       const upload = new Upload({
         client: this.s3Client,
         params: {
@@ -78,7 +148,6 @@ export class S3ArtifactManager {
 
       await upload.done()
 
-      // Get object info to return size
       const headResponse = await this.s3Client.send(
         new HeadObjectCommand({
           Bucket: this.bucket,
@@ -88,122 +157,27 @@ export class S3ArtifactManager {
 
       return {
         uploadSize: headResponse.ContentLength,
-        sha256Hash: headResponse.ETag?.replace(/"/g, '') // Remove quotes from ETag
+        sha256Hash: headResponse.ETag?.replace(/"/g, '')
       }
     } catch (error) {
       throw new S3UploadError(
-        `Failed to upload artifact: ${S3UploadError.getErrorMessage(error)}`,
+        `Failed to upload artifact: ${error}`,
         error?.code
       )
     }
   }
 
-  async finalizeArtifact(
-    key: string,
-    metadata: Omit<ArtifactMetadata, 'bucket' | 'key'>
-  ): Promise<ArtifactMetadata> {
+  async finalizeArtifact(key: string): Promise<void> {
     try {
-      // Verify the object exists
       await this.s3Client.send(
         new HeadObjectCommand({
           Bucket: this.bucket,
           Key: key
         })
       )
-
-      const finalMetadata: ArtifactMetadata = {
-        ...metadata,
-        bucket: this.bucket,
-        key
-      }
-
-      // Store metadata as S3 object tags or in a separate metadata object
-      const metadataKey = `${key}.metadata.json`
-      await this.s3Client.send(
-        new PutObjectCommand({
-          Bucket: this.bucket,
-          Key: metadataKey,
-          Body: JSON.stringify(finalMetadata),
-          ContentType: 'application/json'
-        })
-      )
-
-      core.debug(`Finalized artifact metadata: ${metadataKey}`)
-      return finalMetadata
     } catch (error) {
       throw new S3UploadError(
-        `Failed to finalize artifact: ${S3UploadError.getErrorMessage(error)}`,
-        error?.code
-      )
-    }
-  }
-
-  async getArtifactMetadata(key: string): Promise<ArtifactMetadata> {
-    try {
-      const metadataKey = `${key}.metadata.json`
-      const response = await this.s3Client.send(
-        new GetObjectCommand({
-          Bucket: this.bucket,
-          Key: metadataKey
-        })
-      )
-
-      const bodyContent = await response.Body?.transformToString()
-      if (!bodyContent) {
-        throw new Error('Failed to read artifact metadata: Empty response body')
-      }
-      const metadata = JSON.parse(bodyContent)
-      return metadata as ArtifactMetadata
-    } catch (error) {
-      throw new Error(`Failed to get artifact metadata: ${error.message}`)
-    }
-  }
-
-  async createMultipartUpload(
-    name: string
-  ): Promise<{uploadId: string; key: string}> {
-    try {
-      const key = `artifacts/${uuidv4()}/${name}`
-      const response = await this.s3Client.send(
-        new CreateMultipartUploadCommand({
-          Bucket: this.bucket,
-          Key: key
-        })
-      )
-
-      if (!response.UploadId) {
-        throw new S3UploadError('Failed to get upload ID')
-      }
-
-      return {
-        uploadId: response.UploadId,
-        key
-      }
-    } catch (error) {
-      throw new S3UploadError(
-        `Failed to create multipart upload: ${S3UploadError.getErrorMessage(error)}`,
-        error?.code
-      )
-    }
-  }
-
-  async completeMultipartUpload(
-    key: string,
-    uploadId: string,
-    parts: Array<{ETag: string; PartNumber: number}>
-  ): Promise<void> {
-    try {
-      await this.s3Client.send(
-        new CompleteMultipartUploadCommand({
-          Bucket: this.bucket,
-          Key: key,
-          UploadId: uploadId,
-          MultipartUpload: {Parts: parts}
-        })
-      )
-    } catch (error) {
-      throw new S3UploadError(
-        `Failed to complete multipart upload: ${S3UploadError.getErrorMessage(error)}`,
+        `Failed to finalize artifact: ${error}`,
         error?.code
       )
     }
@@ -211,19 +185,18 @@ export class S3ArtifactManager {
 
   async getSignedDownloadUrl(artifactId: string): Promise<string> {
     try {
-      const metadata = await this.getArtifactMetadata(artifactId)
       const command = new GetObjectCommand({
         Bucket: this.bucket,
-        Key: metadata.key
+        Key: `artifacts/${artifactId}`
       })
 
       const downloadUrl = await getSignedUrl(this.s3Client, command, {
-        expiresIn: 3600 // URL expires in 1 hour
+        expiresIn: 3600
       })
 
       return downloadUrl
     } catch (error) {
-      throw new Error(`Failed to get signed download URL: ${error.message}`)
+      throw new Error(`Failed to get signed download URL: ${error}`)
     }
   }
 

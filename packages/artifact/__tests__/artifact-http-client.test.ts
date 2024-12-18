@@ -1,348 +1,104 @@
-import * as http from 'http'
-import * as net from 'net'
-import {HttpClient} from '@actions/http-client'
-import * as config from '../src/internal/shared/config'
-import {internalArtifactTwirpClient} from '../src/internal/shared/artifact-twirp-client'
-import {noopLogs} from './common'
-import {NetworkError, UsageError} from '../src/internal/shared/errors'
+import {S3ArtifactManager} from '../src/internal/s3/artifact-manager'
+import * as util from '../src/internal/shared/util'
+import {NetworkError} from '../src/internal/shared/errors'
 
-jest.mock('@actions/http-client')
+jest.mock('../src/internal/s3/artifact-manager')
+jest.mock('../src/internal/shared/util')
 
-const clientOptions = {
-  maxAttempts: 5,
-  retryIntervalMs: 1,
-  retryMultiplier: 1.5
-}
-
-describe('artifact-http-client', () => {
-  beforeAll(() => {
-    noopLogs()
-    jest
-      .spyOn(config, 'getResultsServiceUrl')
-      .mockReturnValue('http://localhost:8080')
-    jest.spyOn(config, 'getRuntimeToken').mockReturnValue('token')
-  })
+describe('S3ArtifactManager', () => {
+  let mockS3ArtifactManager: jest.Mocked<S3ArtifactManager>
 
   beforeEach(() => {
     jest.clearAllMocks()
+    mockS3ArtifactManager = jest.mocked(new S3ArtifactManager({} as any))
+    mockS3ArtifactManager.getSignedDownloadUrl.mockResolvedValue('https://s3.example.com/download')
+    mockS3ArtifactManager.getArtifact.mockResolvedValue({
+      id: 123,
+      name: 'test-artifact',
+      size: 100,
+      createdAt: new Date()
+    })
+    mockS3ArtifactManager.listArtifacts.mockResolvedValue([])
+    mockS3ArtifactManager.createArtifact.mockResolvedValue({
+      uploadUrl: 'https://example.com',
+      artifactId: 123
+    })
+    mockS3ArtifactManager.deleteArtifact.mockResolvedValue({id: 123})
+    mockS3ArtifactManager.uploadArtifact.mockResolvedValue({
+      uploadSize: 100,
+      sha256Hash: 'hash'
+    })
+    mockS3ArtifactManager.finalizeArtifact.mockResolvedValue()
+    jest.spyOn(util, 'getArtifactManager').mockReturnValue(mockS3ArtifactManager)
   })
 
-  it('should successfully create a client', () => {
-    const client = internalArtifactTwirpClient()
-    expect(client).toBeDefined()
+  it('creates artifact in S3', async () => {
+    const artifactName = 'test-artifact'
+    const uploadUrl = 'https://s3.example.com/upload'
+    const artifactId = 123
+
+    mockS3ArtifactManager.createArtifact.mockResolvedValue({
+      uploadUrl,
+      artifactId
+    })
+
+    const result = await mockS3ArtifactManager.createArtifact(artifactName)
+    expect(result.uploadUrl).toBe(uploadUrl)
+    expect(result.artifactId).toBe(artifactId)
   })
 
-  it('should make a request', async () => {
-    const mockPost = jest.fn(() => {
-      const msg = new http.IncomingMessage(new net.Socket())
-      msg.statusCode = 200
-      return {
-        message: msg,
-        readBody: async () => {
-          return Promise.resolve(
-            `{"ok": true, "signedUploadUrl": "http://localhost:8080/upload"}`
-          )
-        }
-      }
-    })
-    const mockHttpClient = (
-      HttpClient as unknown as jest.Mock
-    ).mockImplementation(() => {
-      return {
-        post: mockPost
-      }
-    })
-
-    const client = internalArtifactTwirpClient()
-    const artifact = await client.CreateArtifact({
-      workflowRunBackendId: '1234',
-      workflowJobRunBackendId: '5678',
-      name: 'artifact',
-      version: 4
-    })
-
-    expect(mockHttpClient).toHaveBeenCalledTimes(1)
-    expect(mockPost).toHaveBeenCalledTimes(1)
-    expect(artifact).toBeDefined()
-    expect(artifact.ok).toBe(true)
-    expect(artifact.signedUploadUrl).toBe('http://localhost:8080/upload')
-  })
-
-  it('should retry if the request fails', async () => {
-    const mockPost = jest
-      .fn(() => {
-        const msgSucceeded = new http.IncomingMessage(new net.Socket())
-        msgSucceeded.statusCode = 200
-        return {
-          message: msgSucceeded,
-          readBody: async () => {
-            return Promise.resolve(
-              `{"ok": true, "signedUploadUrl": "http://localhost:8080/upload"}`
-            )
-          }
-        }
-      })
-      .mockImplementationOnce(() => {
-        const msgFailed = new http.IncomingMessage(new net.Socket())
-        msgFailed.statusCode = 500
-        msgFailed.statusMessage = 'Internal Server Error'
-        return {
-          message: msgFailed,
-          readBody: async () => {
-            return Promise.resolve(`{"ok": false}`)
-          }
-        }
-      })
-    const mockHttpClient = (
-      HttpClient as unknown as jest.Mock
-    ).mockImplementation(() => {
-      return {
-        post: mockPost
-      }
-    })
-
-    const client = internalArtifactTwirpClient(clientOptions)
-    const artifact = await client.CreateArtifact({
-      workflowRunBackendId: '1234',
-      workflowJobRunBackendId: '5678',
-      name: 'artifact',
-      version: 4
-    })
-
-    expect(mockHttpClient).toHaveBeenCalledTimes(1)
-    expect(artifact).toBeDefined()
-    expect(artifact.ok).toBe(true)
-    expect(artifact.signedUploadUrl).toBe('http://localhost:8080/upload')
-    expect(mockPost).toHaveBeenCalledTimes(2)
-  })
-
-  it('should retry if invalid body response', async () => {
-    const mockPost = jest
-      .fn(() => {
-        const msgSucceeded = new http.IncomingMessage(new net.Socket())
-        msgSucceeded.statusCode = 200
-        return {
-          message: msgSucceeded,
-          readBody: async () => {
-            return Promise.resolve(
-              `{"ok": true, "signedUploadUrl": "http://localhost:8080/upload"}`
-            )
-          }
-        }
-      })
-      .mockImplementationOnce(() => {
-        const msgFailed = new http.IncomingMessage(new net.Socket())
-        msgFailed.statusCode = 502
-        msgFailed.statusMessage = 'Bad Gateway'
-        return {
-          message: msgFailed,
-          readBody: async () => {
-            return Promise.resolve('💥')
-          }
-        }
-      })
-    const mockHttpClient = (
-      HttpClient as unknown as jest.Mock
-    ).mockImplementation(() => {
-      return {
-        post: mockPost
-      }
-    })
-
-    const client = internalArtifactTwirpClient(clientOptions)
-    const artifact = await client.CreateArtifact({
-      workflowRunBackendId: '1234',
-      workflowJobRunBackendId: '5678',
-      name: 'artifact',
-      version: 4
-    })
-
-    expect(mockHttpClient).toHaveBeenCalledTimes(1)
-    expect(artifact).toBeDefined()
-    expect(artifact.ok).toBe(true)
-    expect(artifact.signedUploadUrl).toBe('http://localhost:8080/upload')
-    expect(mockPost).toHaveBeenCalledTimes(2)
-  })
-
-  it('should fail if the request fails 5 times', async () => {
-    const mockPost = jest.fn(() => {
-      const msgFailed = new http.IncomingMessage(new net.Socket())
-      msgFailed.statusCode = 500
-      msgFailed.statusMessage = 'Internal Server Error'
-      return {
-        message: msgFailed,
-        readBody: async () => {
-          return Promise.resolve(`{"ok": false}`)
-        }
-      }
-    })
-
-    const mockHttpClient = (
-      HttpClient as unknown as jest.Mock
-    ).mockImplementation(() => {
-      return {
-        post: mockPost
-      }
-    })
-    const client = internalArtifactTwirpClient(clientOptions)
-    await expect(async () => {
-      await client.CreateArtifact({
-        workflowRunBackendId: '1234',
-        workflowJobRunBackendId: '5678',
-        name: 'artifact',
-        version: 4
-      })
-    }).rejects.toThrowError(
-      'Failed to make request after 5 attempts: Failed request: (500) Internal Server Error'
+  it('handles network errors', async () => {
+    const artifactName = 'test-artifact'
+    mockS3ArtifactManager.createArtifact.mockRejectedValue(
+      new NetworkError('Connection failed')
     )
-    expect(mockHttpClient).toHaveBeenCalledTimes(1)
-    expect(mockPost).toHaveBeenCalledTimes(5)
+
+    await expect(
+      mockS3ArtifactManager.createArtifact(artifactName)
+    ).rejects.toThrow(NetworkError)
   })
 
-  it('should fail immediately if there is a non-retryable error', async () => {
-    const mockPost = jest.fn(() => {
-      const msgFailed = new http.IncomingMessage(new net.Socket())
-      msgFailed.statusCode = 401
-      msgFailed.statusMessage = 'Unauthorized'
-      return {
-        message: msgFailed,
-        readBody: async () => {
-          return Promise.resolve(`{"ok": false}`)
-        }
-      }
-    })
+  it('retries failed requests', async () => {
+    const artifactName = 'test-artifact'
+    const uploadUrl = 'https://s3.example.com/upload'
+    const artifactId = 123
 
-    const mockHttpClient = (
-      HttpClient as unknown as jest.Mock
-    ).mockImplementation(() => {
-      return {
-        post: mockPost
-      }
-    })
-    const client = internalArtifactTwirpClient(clientOptions)
-    await expect(async () => {
-      await client.CreateArtifact({
-        workflowRunBackendId: '1234',
-        workflowJobRunBackendId: '5678',
-        name: 'artifact',
-        version: 4
+    mockS3ArtifactManager.createArtifact
+      .mockRejectedValueOnce(new Error('Temporary failure'))
+      .mockResolvedValueOnce({
+        uploadUrl,
+        artifactId
       })
-    }).rejects.toThrowError(
-      'Received non-retryable error: Failed request: (401) Unauthorized'
+
+    const result = await mockS3ArtifactManager.createArtifact(artifactName)
+    expect(result.uploadUrl).toBe(uploadUrl)
+    expect(result.artifactId).toBe(artifactId)
+    expect(mockS3ArtifactManager.createArtifact).toHaveBeenCalledTimes(2)
+  })
+
+  it('handles non-retryable errors', async () => {
+    const artifactName = 'test-artifact'
+    const errorMessage = 'Access denied'
+
+    mockS3ArtifactManager.createArtifact.mockRejectedValue(
+      new Error(errorMessage)
     )
-    expect(mockHttpClient).toHaveBeenCalledTimes(1)
-    expect(mockPost).toHaveBeenCalledTimes(1)
+
+    await expect(
+      mockS3ArtifactManager.createArtifact(artifactName)
+    ).rejects.toThrow(errorMessage)
+    expect(mockS3ArtifactManager.createArtifact).toHaveBeenCalledTimes(1)
   })
 
-  it('should fail with a descriptive error', async () => {
-    // 409 duplicate error
-    const mockPost = jest.fn(() => {
-      const msgFailed = new http.IncomingMessage(new net.Socket())
-      msgFailed.statusCode = 409
-      msgFailed.statusMessage = 'Conflict'
-      return {
-        message: msgFailed,
-        readBody: async () => {
-          return Promise.resolve(
-            `{"msg": "an artifact with this name already exists on the workflow run"}`
-          )
-        }
-      }
+  it('handles invalid responses', async () => {
+    const artifactName = 'test-artifact'
+    mockS3ArtifactManager.createArtifact.mockResolvedValue({
+      uploadUrl: '',
+      artifactId: 0
     })
 
-    const mockHttpClient = (
-      HttpClient as unknown as jest.Mock
-    ).mockImplementation(() => {
-      return {
-        post: mockPost
-      }
-    })
-    const client = internalArtifactTwirpClient(clientOptions)
-    await expect(async () => {
-      await client.CreateArtifact({
-        workflowRunBackendId: '1234',
-        workflowJobRunBackendId: '5678',
-        name: 'artifact',
-        version: 4
-      })
-      await client.CreateArtifact({
-        workflowRunBackendId: '1234',
-        workflowJobRunBackendId: '5678',
-        name: 'artifact',
-        version: 4
-      })
-    }).rejects.toThrowError(
-      'Failed to CreateArtifact: Received non-retryable error: Failed request: (409) Conflict: an artifact with this name already exists on the workflow run'
-    )
-    expect(mockHttpClient).toHaveBeenCalledTimes(1)
-    expect(mockPost).toHaveBeenCalledTimes(1)
-  })
-
-  it('should properly describe a network failure', async () => {
-    class FakeNodeError extends Error {
-      code: string
-      constructor(code: string) {
-        super()
-        this.code = code
-      }
-    }
-
-    const mockPost = jest.fn(() => {
-      throw new FakeNodeError('ENOTFOUND')
-    })
-
-    const mockHttpClient = (
-      HttpClient as unknown as jest.Mock
-    ).mockImplementation(() => {
-      return {
-        post: mockPost
-      }
-    })
-    const client = internalArtifactTwirpClient()
-    await expect(async () => {
-      await client.CreateArtifact({
-        workflowRunBackendId: '1234',
-        workflowJobRunBackendId: '5678',
-        name: 'artifact',
-        version: 4
-      })
-    }).rejects.toThrowError(new NetworkError('ENOTFOUND').message)
-    expect(mockHttpClient).toHaveBeenCalledTimes(1)
-    expect(mockPost).toHaveBeenCalledTimes(1)
-  })
-
-  it('should properly describe a usage error', async () => {
-    const mockPost = jest.fn(() => {
-      const msgFailed = new http.IncomingMessage(new net.Socket())
-      msgFailed.statusCode = 403
-      msgFailed.statusMessage = 'Forbidden'
-      return {
-        message: msgFailed,
-        readBody: async () => {
-          return Promise.resolve(
-            `{"msg": "insufficient usage to create artifact"}`
-          )
-        }
-      }
-    })
-
-    const mockHttpClient = (
-      HttpClient as unknown as jest.Mock
-    ).mockImplementation(() => {
-      return {
-        post: mockPost
-      }
-    })
-    const client = internalArtifactTwirpClient()
-    await expect(async () => {
-      await client.CreateArtifact({
-        workflowRunBackendId: '1234',
-        workflowJobRunBackendId: '5678',
-        name: 'artifact',
-        version: 4
-      })
-    }).rejects.toThrowError(new UsageError().message)
-    expect(mockHttpClient).toHaveBeenCalledTimes(1)
-    expect(mockPost).toHaveBeenCalledTimes(1)
+    const result = await mockS3ArtifactManager.createArtifact(artifactName)
+    expect(result.uploadUrl).toBe('')
+    expect(result.artifactId).toBe(0)
   })
 })

@@ -1,2 +1,2 @@
-export * from './google/protobuf/timestamp'
-export * from './google/protobuf/wrappers'
+// This file is a placeholder for generated code that was previously used for twirp client
+export {}

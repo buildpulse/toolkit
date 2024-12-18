@@ -1,192 +1,70 @@
-import * as github from '@actions/github'
-import type {RestEndpointMethods} from '@octokit/plugin-rest-endpoint-methods/dist-types/generated/method-types'
-import type {RequestInterface} from '@octokit/types'
-import {
-  deleteArtifactInternal,
-  deleteArtifactPublic
-} from '../src/internal/delete/delete-artifact'
-import * as config from '../src/internal/shared/config'
-import {ArtifactServiceClientJSON, Timestamp} from '../src/generated'
+import {deleteArtifact} from '../src/internal/delete/delete-artifact'
+import {S3ArtifactManager} from '../src/internal/s3/artifact-manager'
 import * as util from '../src/internal/shared/util'
-import {noopLogs} from './common'
+import {DeleteArtifactResponse} from '../src/internal/shared/interfaces'
 
-type MockedRequest = jest.MockedFunction<RequestInterface<object>>
-
-type MockedDeleteArtifact = jest.MockedFunction<
-  RestEndpointMethods['actions']['deleteArtifact']
->
-
-jest.mock('@actions/github', () => ({
-  getOctokit: jest.fn().mockReturnValue({
-    request: jest.fn(),
-    rest: {
-      actions: {
-        deleteArtifact: jest.fn()
-      }
-    }
-  })
-}))
+jest.mock('../src/internal/s3/artifact-manager')
+jest.mock('../src/internal/shared/util')
 
 const fixtures = {
-  repo: 'toolkit',
-  owner: 'actions',
-  token: 'ghp_1234567890',
-  runId: 123,
-  backendIds: {
-    workflowRunBackendId: 'c4d7c21f-ba3f-4ddc-a8c8-6f2f626f8422',
-    workflowJobRunBackendId: '760803a1-f890-4d25-9a6e-a3fc01a0c7cf'
-  },
-  artifacts: [
-    {
-      id: 1,
-      name: 'my-artifact',
-      size: 456,
-      createdAt: new Date('2023-12-01')
-    },
-    {
-      id: 2,
-      name: 'my-artifact',
-      size: 456,
-      createdAt: new Date('2023-12-02')
-    }
-  ]
+  artifactName: 'test-artifact',
+  artifactId: '12345'
 }
 
 describe('delete-artifact', () => {
-  beforeAll(() => {
-    noopLogs()
+  let mockS3ArtifactManager: jest.Mocked<S3ArtifactManager>
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockS3ArtifactManager = {
+      getSignedDownloadUrl: jest.fn().mockResolvedValue('https://s3.example.com/download'),
+      getArtifact: jest.fn().mockResolvedValue({
+        id: parseInt(fixtures.artifactId),
+        name: fixtures.artifactName,
+        size: 100,
+        createdAt: new Date()
+      }),
+      listArtifacts: jest.fn().mockResolvedValue([]),
+      createArtifact: jest.fn().mockResolvedValue({
+        uploadUrl: 'https://example.com',
+        artifactId: parseInt(fixtures.artifactId)
+      }),
+      deleteArtifact: jest.fn().mockResolvedValue({
+        id: parseInt(fixtures.artifactId)
+      }),
+      uploadArtifact: jest.fn().mockResolvedValue({
+        uploadSize: 100,
+        sha256Hash: 'hash'
+      }),
+      finalizeArtifact: jest.fn().mockResolvedValue(undefined)
+    } as unknown as jest.Mocked<S3ArtifactManager>
+    jest.spyOn(util, 'getArtifactManager').mockReturnValue(mockS3ArtifactManager)
   })
 
-  describe('public', () => {
-    it('should delete an artifact', async () => {
-      const mockRequest = github.getOctokit(fixtures.token)
-        .request as MockedRequest
-      mockRequest.mockResolvedValueOnce({
-        status: 200,
-        headers: {},
-        url: '',
-        data: {
-          artifacts: [
-            {
-              name: fixtures.artifacts[0].name,
-              id: fixtures.artifacts[0].id,
-              size_in_bytes: fixtures.artifacts[0].size,
-              created_at: fixtures.artifacts[0].createdAt.toISOString()
-            }
-          ]
-        }
-      })
-
-      const mockDeleteArtifact = github.getOctokit(fixtures.token).rest.actions
-        .deleteArtifact as MockedDeleteArtifact
-      mockDeleteArtifact.mockResolvedValueOnce({
-        status: 204,
-        headers: {},
-        url: '',
-        data: null as never
-      })
-
-      const response = await deleteArtifactPublic(
-        fixtures.artifacts[0].name,
-        fixtures.runId,
-        fixtures.owner,
-        fixtures.repo,
-        fixtures.token
-      )
-
-      expect(response).toEqual({
-        id: fixtures.artifacts[0].id
-      })
-    })
-
-    it('should fail if non-200 response', async () => {
-      const mockRequest = github.getOctokit(fixtures.token)
-        .request as MockedRequest
-      mockRequest.mockResolvedValueOnce({
-        status: 200,
-        headers: {},
-        url: '',
-        data: {
-          artifacts: [
-            {
-              name: fixtures.artifacts[0].name,
-              id: fixtures.artifacts[0].id,
-              size_in_bytes: fixtures.artifacts[0].size,
-              created_at: fixtures.artifacts[0].createdAt.toISOString()
-            }
-          ]
-        }
-      })
-
-      const mockDeleteArtifact = github.getOctokit(fixtures.token).rest.actions
-        .deleteArtifact as MockedDeleteArtifact
-      mockDeleteArtifact.mockRejectedValue(new Error('boom'))
-
-      await expect(
-        deleteArtifactPublic(
-          fixtures.artifacts[0].name,
-          fixtures.runId,
-          fixtures.owner,
-          fixtures.repo,
-          fixtures.token
-        )
-      ).rejects.toThrow('boom')
-    })
+  it('deletes artifact from S3', async () => {
+    const result = await deleteArtifact(fixtures.artifactId)
+    expect(result.id).toBe(parseInt(fixtures.artifactId))
+    expect(mockS3ArtifactManager.deleteArtifact).toHaveBeenCalledWith(
+      expect.stringContaining(fixtures.artifactId)
+    )
   })
 
-  describe('internal', () => {
-    beforeEach(() => {
-      jest.spyOn(config, 'getRuntimeToken').mockReturnValue('test-token')
-      jest
-        .spyOn(util, 'getBackendIdsFromToken')
-        .mockReturnValue(fixtures.backendIds)
-      jest
-        .spyOn(config, 'getResultsServiceUrl')
-        .mockReturnValue('https://results.local')
-    })
+  it('throws error when artifact deletion fails', async () => {
+    const errorMessage = 'Failed to delete artifact'
+    mockS3ArtifactManager.deleteArtifact.mockRejectedValue(new Error(errorMessage))
 
-    it('should delete an artifact', async () => {
-      jest
-        .spyOn(ArtifactServiceClientJSON.prototype, 'ListArtifacts')
-        .mockResolvedValue({
-          artifacts: fixtures.artifacts.map(artifact => ({
-            ...fixtures.backendIds,
-            databaseId: artifact.id.toString(),
-            name: artifact.name,
-            size: artifact.size.toString(),
-            createdAt: Timestamp.fromDate(artifact.createdAt)
-          }))
-        })
-      jest
-        .spyOn(ArtifactServiceClientJSON.prototype, 'DeleteArtifact')
-        .mockResolvedValue({
-          ok: true,
-          artifactId: fixtures.artifacts[0].id.toString()
-        })
-      const response = await deleteArtifactInternal(fixtures.artifacts[0].name)
-      expect(response).toEqual({
-        id: fixtures.artifacts[0].id
+    await expect(deleteArtifact(fixtures.artifactId)).rejects.toThrow(errorMessage)
+  })
+
+  it('retries failed deletions', async () => {
+    mockS3ArtifactManager.deleteArtifact
+      .mockRejectedValueOnce(new Error('Temporary failure'))
+      .mockResolvedValueOnce({
+        id: parseInt(fixtures.artifactId)
       })
-    })
 
-    it('should fail if non-200 response', async () => {
-      jest
-        .spyOn(ArtifactServiceClientJSON.prototype, 'ListArtifacts')
-        .mockResolvedValue({
-          artifacts: fixtures.artifacts.map(artifact => ({
-            ...fixtures.backendIds,
-            databaseId: artifact.id.toString(),
-            name: artifact.name,
-            size: artifact.size.toString(),
-            createdAt: Timestamp.fromDate(artifact.createdAt)
-          }))
-        })
-      jest
-        .spyOn(ArtifactServiceClientJSON.prototype, 'DeleteArtifact')
-        .mockRejectedValue(new Error('boom'))
-      await expect(
-        deleteArtifactInternal(fixtures.artifacts[0].id)
-      ).rejects.toThrow('boom')
-    })
+    const result = await deleteArtifact(fixtures.artifactId)
+    expect(result.id).toBe(parseInt(fixtures.artifactId))
+    expect(mockS3ArtifactManager.deleteArtifact).toHaveBeenCalledTimes(2)
   })
 })
