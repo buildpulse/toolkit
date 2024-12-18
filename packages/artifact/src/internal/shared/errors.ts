@@ -70,3 +70,35 @@ export class UsageError extends Error {
     return msg.includes('insufficient usage')
   }
 }
+
+export class S3UploadError extends Error {
+  code?: string
+
+  constructor(message: string, code?: string) {
+    super(message)
+    this.name = 'S3UploadError'
+    this.code = code
+  }
+
+  static isS3Error = (error: unknown): boolean => {
+    if (!error || typeof error !== 'object') return false
+    return (
+      'name' in error &&
+      (error.name === 'S3ServiceException' ||
+        error.name === 'MultipartUploadError' ||
+        error.name === 'S3UploadError')
+    )
+  }
+
+  static getErrorMessage(error: unknown): string {
+    if (!error || typeof error !== 'object') {
+      return 'Unknown S3 upload error'
+    }
+
+    if ('message' in error && typeof error.message === 'string') {
+      return error.message
+    }
+
+    return 'Failed to upload to S3'
+  }
+}

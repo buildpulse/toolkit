@@ -8,6 +8,7 @@ import {
 } from '@aws-sdk/client-s3'
 import { ZipUploadStream } from './zip'
 import { BlobUploadResponse } from './blob-upload'
+import { S3UploadError } from '../shared/errors'
 import * as crypto from 'crypto'
 import * as stream from 'stream'
 
@@ -30,17 +31,24 @@ export async function uploadZipToS3(
     const key = url.pathname.substring(1)
 
     // Start multipart upload
-    const createMultipartUpload = await s3Client.send(
-      new CreateMultipartUploadCommand({
-        Bucket: bucket,
-        Key: key,
-        ContentType: 'zip'
-      })
-    )
-
-    const uploadId = createMultipartUpload.UploadId
-    if (!uploadId) {
-      throw new Error('Failed to get upload ID from S3')
+    let uploadId: string
+    try {
+      const createMultipartUpload = await s3Client.send(
+        new CreateMultipartUploadCommand({
+          Bucket: bucket,
+          Key: key,
+          ContentType: 'application/zip'
+        })
+      )
+      if (!createMultipartUpload.UploadId) {
+        throw new S3UploadError('Failed to get upload ID from S3')
+      }
+      uploadId = createMultipartUpload.UploadId
+    } catch (error) {
+      throw new S3UploadError(
+        `Failed to initiate multipart upload: ${S3UploadError.getErrorMessage(error)}`,
+        'CREATE_MULTIPART_FAILED'
+      )
     }
 
     const uploadPromises: Promise<void>[] = []
@@ -97,48 +105,77 @@ export async function uploadZipToS3(
       uploadSize += chunk.length
       core.info(`Uploaded bytes ${uploadSize}`)
 
-      const uploadPartCommand = new UploadPartCommand({
-        Bucket: bucket,
-        Key: key,
-        UploadId: uploadId,
-        PartNumber: partNumber,
-        Body: chunk
-      })
-
-      uploadPromises.push(
-        s3Client.send(uploadPartCommand).then(response => {
-          if (!response.ETag) {
-            throw new Error(`Failed to get ETag for part ${partNumber}`)
-          }
-          uploadedParts.push({
-            PartNumber: partNumber,
-            ETag: response.ETag
-          })
+      try {
+        const uploadPartCommand = new UploadPartCommand({
+          Bucket: bucket,
+          Key: key,
+          UploadId: uploadId,
+          PartNumber: partNumber,
+          Body: chunk
         })
-      )
 
-      if (uploadPromises.length >= maxConcurrency) {
-        await Promise.all(uploadPromises)
-        uploadPromises.length = 0
+        uploadPromises.push(
+          s3Client.send(uploadPartCommand).then(response => {
+            if (!response.ETag) {
+              throw new S3UploadError(
+                `Failed to get ETag for part ${partNumber}`,
+                'MISSING_ETAG'
+              )
+            }
+            uploadedParts.push({
+              PartNumber: partNumber,
+              ETag: response.ETag
+            })
+          })
+        )
+
+        if (uploadPromises.length >= maxConcurrency) {
+          await Promise.all(uploadPromises).catch(error => {
+            throw new S3UploadError(
+              `Failed to upload part ${partNumber}: ${S3UploadError.getErrorMessage(error)}`,
+              'UPLOAD_PART_FAILED'
+            )
+          })
+          uploadPromises.length = 0
+        }
+
+        partNumber++
+      } catch (error) {
+        throw new S3UploadError(
+          `Failed to upload part ${partNumber}: ${S3UploadError.getErrorMessage(error)}`,
+          'UPLOAD_PART_FAILED'
+        )
       }
-
-      partNumber++
     }
 
     // Wait for any remaining uploads to complete
-    await Promise.all(uploadPromises)
+    try {
+      await Promise.all(uploadPromises)
+    } catch (error) {
+      throw new S3UploadError(
+        `Failed to complete remaining uploads: ${S3UploadError.getErrorMessage(error)}`,
+        'UPLOAD_PARTS_FAILED'
+      )
+    }
 
     // Complete the multipart upload
-    await s3Client.send(
-      new CompleteMultipartUploadCommand({
-        Bucket: bucket,
-        Key: key,
-        UploadId: uploadId,
-        MultipartUpload: {
-          Parts: uploadedParts.sort((a, b) => a.PartNumber - b.PartNumber)
-        }
-      })
-    )
+    try {
+      await s3Client.send(
+        new CompleteMultipartUploadCommand({
+          Bucket: bucket,
+          Key: key,
+          UploadId: uploadId,
+          MultipartUpload: {
+            Parts: uploadedParts.sort((a, b) => a.PartNumber - b.PartNumber)
+          }
+        })
+      )
+    } catch (error) {
+      throw new S3UploadError(
+        `Failed to complete multipart upload: ${S3UploadError.getErrorMessage(error)}`,
+        'COMPLETE_MULTIPART_FAILED'
+      )
+    }
 
     // Get the SHA256 hash
     hashStream.end()
@@ -146,7 +183,7 @@ export async function uploadZipToS3(
     core.info(`SHA256 hash of uploaded artifact zip is ${sha256Hash}`)
 
     if (uploadSize === 0) {
-      core.warning('No data was uploaded to S3. Reported upload byte count is 0.')
+      throw new S3UploadError('No data was uploaded to S3', 'ZERO_BYTES_UPLOADED')
     }
 
     return {
@@ -154,9 +191,12 @@ export async function uploadZipToS3(
       sha256Hash
     }
   } catch (error) {
-    core.warning(
-      `uploadZipToS3: internal error uploading zip archive: ${error.message}`
+    if (S3UploadError.isS3Error(error)) {
+      throw error
+    }
+    throw new S3UploadError(
+      `Unexpected error uploading to S3: ${error.message}`,
+      'UNEXPECTED_ERROR'
     )
-    throw error
   }
 }
