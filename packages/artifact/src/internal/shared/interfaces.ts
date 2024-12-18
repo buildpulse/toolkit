@@ -85,7 +85,12 @@ export interface DownloadArtifactResponse {
   /**
    * The path where the artifact was downloaded to
    */
-  downloadPath?: string
+  downloadPath: string
+
+  /**
+   * The artifact that was downloaded
+   */
+  artifact: Artifact
 }
 
 /**

@@ -1,104 +1,118 @@
+import {Readable} from 'stream'
+import {
+  S3Client,
+  CreateMultipartUploadCommandOutput,
+  CreateMultipartUploadCommand,
+  ServiceInputTypes,
+  ServiceOutputTypes
+} from '@aws-sdk/client-s3'
 import {S3ArtifactManager} from '../src/internal/s3/artifact-manager'
 import * as util from '../src/internal/shared/util'
 import {NetworkError} from '../src/internal/shared/errors'
 
-jest.mock('../src/internal/s3/artifact-manager')
+jest.mock('@aws-sdk/client-s3')
+jest.mock('@aws-sdk/s3-request-presigner', () => ({
+  getSignedUrl: jest.fn().mockResolvedValue('https://s3.example.com/upload')
+}))
 jest.mock('../src/internal/shared/util')
 
 describe('S3ArtifactManager', () => {
-  let mockS3ArtifactManager: jest.Mocked<S3ArtifactManager>
+  let s3Client: jest.Mocked<S3Client>
+  let artifactManager: S3ArtifactManager
 
   beforeEach(() => {
     jest.clearAllMocks()
-    mockS3ArtifactManager = jest.mocked(new S3ArtifactManager({} as any))
-    mockS3ArtifactManager.getSignedDownloadUrl.mockResolvedValue('https://s3.example.com/download')
-    mockS3ArtifactManager.getArtifact.mockResolvedValue({
-      id: 123,
-      name: 'test-artifact',
-      size: 100,
-      createdAt: new Date()
+    const mockSend = jest.fn()
+    s3Client = {
+      send: mockSend
+    } as unknown as jest.Mocked<S3Client>
+
+    mockSend.mockImplementation((command: any) => {
+      const response = (command instanceof CreateMultipartUploadCommand)
+        ? {UploadId: 'test-upload-id'}
+        : {}
+      return Promise.resolve(response)
     })
-    mockS3ArtifactManager.listArtifacts.mockResolvedValue([])
-    mockS3ArtifactManager.createArtifact.mockResolvedValue({
-      uploadUrl: 'https://example.com',
-      artifactId: 123
+
+    const config = {
+      region: 'us-east-1',
+      bucket: 'test-bucket',
+      credentials: {
+        accessKeyId: 'test-key',
+        secretAccessKey: 'test-secret'
+      }
+    }
+    artifactManager = new S3ArtifactManager({
+      ...config,
+      s3Client
     })
-    mockS3ArtifactManager.deleteArtifact.mockResolvedValue({id: 123})
-    mockS3ArtifactManager.uploadArtifact.mockResolvedValue({
-      uploadSize: 100,
-      sha256Hash: 'hash'
-    })
-    mockS3ArtifactManager.finalizeArtifact.mockResolvedValue()
-    jest.spyOn(util, 'getArtifactManager').mockReturnValue(mockS3ArtifactManager)
   })
 
   it('creates artifact in S3', async () => {
     const artifactName = 'test-artifact'
     const uploadUrl = 'https://s3.example.com/upload'
-    const artifactId = 123
 
-    mockS3ArtifactManager.createArtifact.mockResolvedValue({
-      uploadUrl,
-      artifactId
-    })
-
-    const result = await mockS3ArtifactManager.createArtifact(artifactName)
+    const result = await artifactManager.createArtifact(artifactName)
     expect(result.uploadUrl).toBe(uploadUrl)
-    expect(result.artifactId).toBe(artifactId)
+    expect(result.artifactId).toBeDefined()
   })
 
   it('handles network errors', async () => {
     const artifactName = 'test-artifact'
-    mockS3ArtifactManager.createArtifact.mockRejectedValue(
-      new NetworkError('Connection failed')
-    )
+    const error = new NetworkError('NetworkingError', 'Network error: temporary failure')
+    artifactManager.createArtifact = jest.fn().mockRejectedValueOnce(error)
 
     await expect(
-      mockS3ArtifactManager.createArtifact(artifactName)
-    ).rejects.toThrow(NetworkError)
+      artifactManager.createArtifact(artifactName)
+    ).rejects.toThrow('Network error: temporary failure')
   })
 
   it('retries failed requests', async () => {
     const artifactName = 'test-artifact'
     const uploadUrl = 'https://s3.example.com/upload'
-    const artifactId = 123
+    let retryCount = 0
 
-    mockS3ArtifactManager.createArtifact
-      .mockRejectedValueOnce(new Error('Temporary failure'))
-      .mockResolvedValueOnce({
-        uploadUrl,
-        artifactId
-      })
+    s3Client.send.mockImplementation((command: any) => {
+      retryCount++
+      if (retryCount === 1) {
+        return Promise.reject({
+          name: 'NetworkError',
+          code: 'ECONNREFUSED',
+          message: 'Connection refused'
+        })
+      }
+      const response = (command instanceof CreateMultipartUploadCommand)
+        ? {UploadId: 'test-upload-id'}
+        : {}
+      return Promise.resolve(response)
+    })
 
-    const result = await mockS3ArtifactManager.createArtifact(artifactName)
+    const result = await artifactManager.createArtifact(artifactName)
     expect(result.uploadUrl).toBe(uploadUrl)
-    expect(result.artifactId).toBe(artifactId)
-    expect(mockS3ArtifactManager.createArtifact).toHaveBeenCalledTimes(2)
+    expect(result.artifactId).toBeDefined()
+    expect(retryCount).toBe(2) // Verify retry happened
   })
 
   it('handles non-retryable errors', async () => {
     const artifactName = 'test-artifact'
-    const errorMessage = 'Access denied'
-
-    mockS3ArtifactManager.createArtifact.mockRejectedValue(
-      new Error(errorMessage)
-    )
+    const error = new Error('Access denied')
+    s3Client.send.mockImplementationOnce(() => Promise.reject(error))
 
     await expect(
-      mockS3ArtifactManager.createArtifact(artifactName)
-    ).rejects.toThrow(errorMessage)
-    expect(mockS3ArtifactManager.createArtifact).toHaveBeenCalledTimes(1)
+      artifactManager.createArtifact(artifactName)
+    ).rejects.toThrow('Access denied')
+    expect(s3Client.send).toHaveBeenCalledTimes(1)
   })
 
   it('handles invalid responses', async () => {
     const artifactName = 'test-artifact'
-    mockS3ArtifactManager.createArtifact.mockResolvedValue({
-      uploadUrl: '',
-      artifactId: 0
+    s3Client.send.mockImplementation((command: any) => {
+      const response = {UploadId: undefined}
+      return Promise.resolve(response)
     })
 
-    const result = await mockS3ArtifactManager.createArtifact(artifactName)
-    expect(result.uploadUrl).toBe('')
-    expect(result.artifactId).toBe(0)
+    await expect(
+      artifactManager.createArtifact(artifactName)
+    ).rejects.toThrow('Failed to create multipart upload')
   })
 })

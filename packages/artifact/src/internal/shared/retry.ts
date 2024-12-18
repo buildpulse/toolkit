@@ -30,7 +30,10 @@ export async function retry<T>(
       lastError = error as Error
       const isRetryable =
         retryableErrors.length === 0 ||
-        retryableErrors.some(msg => lastError?.message?.includes(msg))
+        retryableErrors.some(msg =>
+          lastError?.message?.includes(msg) ||
+          (lastError as any)?.code === msg
+        )
 
       if (!isRetryable || attempt === maxRetries) {
         throw error

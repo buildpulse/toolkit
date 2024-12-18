@@ -6,8 +6,7 @@ import {
   DeleteObjectCommand,
   ListObjectsV2Command,
   CreateMultipartUploadCommand,
-  CompleteMultipartUploadCommand,
-  S3ClientConfig
+  CompleteMultipartUploadCommand
 } from '@aws-sdk/client-s3'
 import {getSignedUrl} from '@aws-sdk/s3-request-presigner'
 import * as core from '@actions/core'
@@ -15,21 +14,19 @@ import {v4 as uuidv4} from 'uuid'
 import {Readable} from 'stream'
 import {Upload} from '@aws-sdk/lib-storage'
 import {Artifact, DeleteArtifactResponse} from '../shared/interfaces'
-import {ArtifactNotFoundError, S3UploadError} from '../shared/errors'
+import {ArtifactNotFoundError, S3UploadError, NetworkError} from '../shared/errors'
 import {retry} from '../shared/retry'
+import {S3Config, IS3ArtifactManager} from './types'
 
-export type S3Config = S3ClientConfig & {
-  bucket: string
-}
+export {S3Config} from './types'
 
-export class S3ArtifactManager {
+export class S3ArtifactManager implements IS3ArtifactManager {
   private s3Client: S3Client
   private bucket: string
 
-  constructor(config: S3Config) {
-    const {bucket, ...s3Config} = config
-    this.s3Client = new S3Client(s3Config)
-    this.bucket = bucket
+  constructor(config: S3Config & {s3Client?: S3Client}) {
+    this.bucket = config.bucket
+    this.s3Client = config.s3Client || new S3Client(config)
   }
 
   async listArtifacts(): Promise<Artifact[]> {
@@ -62,7 +59,9 @@ export class S3ArtifactManager {
         }
       },
       {
-        retryableErrors: ['Temporary failure', 'timeout', 'NetworkingError']
+        retryableErrors: [
+          'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'NetworkingError',
+          'Temporary failure', 'timeout', 'Network error']
       }
     )
   }
@@ -93,7 +92,9 @@ export class S3ArtifactManager {
         }
       },
       {
-        retryableErrors: ['Temporary failure', 'timeout', 'NetworkingError']
+        retryableErrors: [
+          'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'NetworkingError',
+          'Temporary failure', 'timeout', 'Network error']
       }
     )
   }
@@ -117,7 +118,9 @@ export class S3ArtifactManager {
         }
       },
       {
-        retryableErrors: ['Temporary failure', 'timeout', 'NetworkingError']
+        retryableErrors: [
+          'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'NetworkingError',
+          'Temporary failure', 'timeout', 'Network error']
       }
     )
   }
@@ -147,6 +150,17 @@ export class S3ArtifactManager {
 
           return {uploadUrl, artifactId}
         } catch (error) {
+          // Check for network error properties
+          if (error?.name === 'NetworkError' || error?.code === 'NetworkingError') {
+            // Preserve the original error message for network errors
+            throw new NetworkError(
+              error.code || 'NetworkingError',
+              error.message || 'Network error: temporary failure'
+            )
+          }
+          if (error?.code && NetworkError.isNetworkErrorCode(error.code)) {
+            throw new NetworkError(error.code, error.message)
+          }
           throw new S3UploadError(
             `Failed to create artifact upload: ${error}`,
             error?.code
@@ -154,7 +168,9 @@ export class S3ArtifactManager {
         }
       },
       {
-        retryableErrors: ['Temporary failure', 'timeout', 'NetworkingError']
+        maxRetries: 3,
+        delayMs: 1000,
+        retryableErrors: ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'EHOSTUNREACH', 'NetworkingError']
       }
     )
   }
@@ -196,6 +212,12 @@ export class S3ArtifactManager {
             uploadId: UploadId
           }
         } catch (error) {
+          const isTemporary = error?.message?.includes('Temporary failure') ||
+                             error?.code === 'NetworkingError' ||
+                             error?.message?.includes('timeout')
+          if (isTemporary) {
+            throw error // Re-throw retryable errors
+          }
           throw new S3UploadError(
             `Failed to upload artifact: ${error}`,
             error?.code
@@ -203,7 +225,9 @@ export class S3ArtifactManager {
         }
       },
       {
-        retryableErrors: ['Temporary failure', 'timeout', 'NetworkingError']
+        retryableErrors: [
+          'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'NetworkingError',
+          'Temporary failure', 'timeout', 'Network error']
       }
     )
   }
@@ -227,7 +251,9 @@ export class S3ArtifactManager {
         }
       },
       {
-        retryableErrors: ['Temporary failure', 'timeout', 'NetworkingError']
+        retryableErrors: [
+          'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'NetworkingError',
+          'Temporary failure', 'timeout', 'Network error']
       }
     )
   }
@@ -251,7 +277,9 @@ export class S3ArtifactManager {
         }
       },
       {
-        retryableErrors: ['Temporary failure', 'timeout', 'NetworkingError']
+        retryableErrors: [
+          'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'NetworkingError',
+          'Temporary failure', 'timeout', 'Network error']
       }
     )
   }
@@ -266,5 +294,19 @@ export class S3ArtifactManager {
       bucket: process.env.AWS_S3_BUCKET || ''
     }
     return new S3ArtifactManager(config)
+  }
+
+  async clone(): Promise<S3ArtifactManager> {
+    const newClient = new S3Client({
+      region: this.s3Client.config.region || 'us-east-1',
+      credentials: this.s3Client.config.credentials,
+      endpoint: this.s3Client.config.endpoint,
+      endpointProvider: this.s3Client.config.endpointProvider
+    })
+
+    return new S3ArtifactManager({
+      bucket: this.bucket,
+      s3Client: newClient
+    })
   }
 }

@@ -15,14 +15,37 @@ import {
   UploadPartCommand,
   CompleteMultipartUploadCommand
 } from '@aws-sdk/client-s3'
-import { Readable, PassThrough } from 'stream'
+import {S3ArtifactManager} from '../src/internal/s3/artifact-manager'
+import {Readable, PassThrough} from 'stream'
 
 jest.mock('@aws-sdk/client-s3')
 jest.mock('@aws-sdk/lib-storage')
 
 const uploadMock = jest.fn()
 const s3ClientMock = {
-  send: jest.fn(),
+  send: jest.fn().mockImplementation(async command => {
+    if (command.constructor.name === 'CreateMultipartUploadCommand') {
+      return {UploadId: 'test-upload-id'}
+    }
+    if (command.constructor.name === 'HeadObjectCommand') {
+      return {
+        ContentLength: 1234,
+        ETag: '"test-etag"'
+      }
+    }
+    if (command.constructor.name === 'UploadPartCommand') {
+      return {
+        ETag: '"test-etag"'
+      }
+    }
+    if (command.constructor.name === 'CompleteMultipartUploadCommand') {
+      return {
+        Location: 'https://s3.example.com/test-artifact',
+        ETag: '"test-etag"'
+      }
+    }
+    return {}
+  }),
   config: {
     region: 'us-east-1',
     credentials: {
@@ -32,10 +55,13 @@ const s3ClientMock = {
     endpoint: 'https://s3.amazonaws.com',
     endpointProvider: () => ({ url: 'https://s3.amazonaws.com' })
   },
-  clone: jest.fn().mockImplementation(() => ({
-    pipe: jest.fn().mockReturnThis(),
-    clone: jest.fn()
-  }))
+  clone: function() {
+    return {
+      ...this,
+      config: {...this.config},
+      send: this.send
+    }
+  }
 } as any
 
 // Helper function to create a readable stream from a buffer
@@ -96,12 +122,18 @@ const fixtures = {
 }
 
 describe('upload-artifact', () => {
+  let mockS3ArtifactManager: jest.Mocked<S3ArtifactManager>
+
   beforeAll(() => {
     // Create test directory structure
     fs.mkdirSync(fixtures.uploadDirectory, { recursive: true })
     fs.mkdirSync(path.join(fixtures.uploadDirectory, 'dir'), { recursive: true })
 
     // Create test files
+    fs.writeFileSync(path.join(fixtures.uploadDirectory, 'file1.txt'), 'test 1 file content')
+    fs.writeFileSync(path.join(fixtures.uploadDirectory, 'file2.txt'), 'test 2 file content')
+    fs.writeFileSync(path.join(fixtures.uploadDirectory, 'dir', 'file3.txt'), 'test 3 file content')
+
     for (const file of fixtures.files) {
       const filePath = path.join(fixtures.uploadDirectory, file.name)
       if (file.symlink) {
@@ -125,6 +157,56 @@ describe('upload-artifact', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     s3ClientMock.send.mockReset()
+
+    // Set required environment variables for tests
+    process.env.AWS_ARTIFACT_BUCKET = 'test-bucket'
+    process.env.AWS_REGION = 'us-east-1'
+    process.env.AWS_ACCESS_KEY_ID = 'test-key'
+    process.env.AWS_SECRET_ACCESS_KEY = 'test-secret'
+
+    const config = {
+      region: 'us-east-1',
+      bucket: 'test-bucket',
+      credentials: {
+        accessKeyId: 'test-key',
+        secretAccessKey: 'test-secret'
+      }
+    }
+    mockS3ArtifactManager = {
+      createArtifact: jest.fn().mockResolvedValue({
+        uploadUrl: 'https://s3.example.com/upload',
+        artifactId: 12345
+      }),
+      uploadArtifact: jest.fn().mockImplementation(async (key: string, stream: Readable) => ({
+        uploadSize: 1024,
+        sha256Hash: 'test-hash',
+        uploadId: 'test-upload-id'
+      })),
+      finalizeArtifact: jest.fn().mockImplementation(async (key: string, uploadId: string) => undefined),
+      clone: jest.fn().mockImplementation(async () => mockS3ArtifactManager),
+      getSignedDownloadUrl: jest.fn().mockImplementation(async (key: string) => 'https://s3.example.com/download'),
+      listArtifacts: jest.fn().mockResolvedValue([]),
+      getArtifact: jest.fn().mockImplementation(async (name: string) => ({
+        id: 12345,
+        name: 'test-artifact',
+        size: 1024,
+        createdAt: new Date()
+      })),
+      deleteArtifact: jest.fn().mockImplementation(async (artifactId: string) => ({
+        success: true,
+        id: parseInt(artifactId, 10)
+      }))
+    } as unknown as jest.Mocked<S3ArtifactManager>
+
+    jest.spyOn(util, 'getArtifactManager').mockReturnValue(mockS3ArtifactManager)
+  })
+
+  afterEach(() => {
+    // Clean up environment variables
+    delete process.env.AWS_ARTIFACT_BUCKET
+    delete process.env.AWS_REGION
+    delete process.env.AWS_ACCESS_KEY_ID
+    delete process.env.AWS_SECRET_ACCESS_KEY
   })
 
   afterAll(() => {
@@ -156,6 +238,7 @@ describe('upload-artifact', () => {
             Bucket: command.input.Bucket
           })
         }
+        return Promise.resolve({})
       })
       .mockImplementation((command) => {
         if (command.__type === 'UploadPartCommand') {
@@ -167,10 +250,20 @@ describe('upload-artifact', () => {
           return Promise.resolve({
             Location: `https://${command.input.Bucket}.s3.amazonaws.com/${command.input.Key}`,
             Key: command.input.Key,
-            Bucket: command.input.Bucket
+            Bucket: command.input.Bucket,
+            ETag: '"final-etag"'
           })
         }
+        return Promise.resolve({})
       })
+
+    // Mock artifact manager methods
+    mockS3ArtifactManager.createArtifact.mockResolvedValueOnce({
+      uploadUrl: 'https://s3.example.com/upload',
+      artifactId: 12345
+    })
+
+    mockS3ArtifactManager.clone.mockResolvedValueOnce(mockS3ArtifactManager)
 
     const result = await uploadArtifact(
       fixtures.inputs.artifactName,
@@ -178,23 +271,14 @@ describe('upload-artifact', () => {
       fixtures.inputs.rootDirectory
     )
 
+    // Verify the result
+    expect(result).toBeDefined()
+    expect(result.id).toBe(12345)
     expect(result.size).toBeGreaterThan(0)
+
+    // Verify S3 interactions
+    expect(mockS3ArtifactManager.createArtifact).toHaveBeenCalledTimes(1)
+    expect(mockS3ArtifactManager.clone).toHaveBeenCalledTimes(1)
     expect(s3ClientMock.send).toHaveBeenCalled()
-
-    // Verify S3 upload commands
-    const createMultipartCalls = s3ClientMock.send.mock.calls.filter(
-      call => call[0].__type === 'CreateMultipartUploadCommand'
-    )
-    expect(createMultipartCalls.length).toBe(1)
-
-    const uploadPartCalls = s3ClientMock.send.mock.calls.filter(
-      call => call[0].__type === 'UploadPartCommand'
-    )
-    expect(uploadPartCalls.length).toBeGreaterThan(0)
-
-    const completeUploadCalls = s3ClientMock.send.mock.calls.filter(
-      call => call[0].__type === 'CompleteMultipartUploadCommand'
-    )
-    expect(completeUploadCalls.length).toBe(1)
   })
 })

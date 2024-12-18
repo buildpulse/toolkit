@@ -26,7 +26,7 @@ describe('util', () => {
 
     it('throws error when S3 config is missing', () => {
       jest.spyOn(config, 'getS3Config').mockImplementation(() => {
-        throw new Error('S3 configuration is required')
+        throw new Error('AWS_ARTIFACT_BUCKET environment variable is not set')
       })
 
       expect(() => util.getArtifactManager()).toThrow('S3 configuration is required')

@@ -84,7 +84,7 @@ export function getUploadZipSpecification(
   for (let file of filesToZip) {
     const stats = fs.lstatSync(file, {throwIfNoEntry: false})
     if (!stats) {
-      throw new Error(`File ${file} does not exist`)
+      throw new FilesNotFoundError([`File ${file} does not exist`])
     }
     if (!stats.isDirectory()) {
       // Normalize and resolve, this allows for either absolute or relative paths to be used
