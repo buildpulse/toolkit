@@ -69,8 +69,9 @@ test('downloadCache uses http-client for non-Azure URLs', async () => {
 
   const archiveLocation = 'http://www.actionscache.test/download'
   const archivePath = '/foo/bar'
+  const options = {useS3: false} as DownloadOptions
 
-  await downloadCache(archiveLocation, archivePath)
+  await downloadCache(archiveLocation, archivePath, options)
 
   expect(downloadCacheHttpClientMock).toHaveBeenCalledTimes(1)
   expect(downloadCacheHttpClientMock).toHaveBeenCalledWith(

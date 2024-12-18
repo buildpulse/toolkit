@@ -295,7 +295,7 @@ test('restore with cache found for restore key', async () => {
   const signedDownloadUrl = 'https://blob-storage.local?signed=true'
   const cacheVersion =
     'b8b58e9bd7b1e8f83d9f05c7e06ea865ba44a0330e07a14db74ac74386677bed'
-  const options = {useAzureSdk: true} as DownloadOptions
+  const options = {useS3: true} as DownloadOptions
 
   const getCacheVersionMock = jest.spyOn(cacheUtils, 'getCacheVersion')
   getCacheVersionMock.mockReturnValue(cacheVersion)
@@ -339,7 +339,6 @@ test('restore with cache found for restore key', async () => {
   expect(getCacheVersionMock).toHaveBeenCalledWith(
     paths,
     compressionMethod,
-    false
   )
   expect(getCacheDownloadURLMock).toHaveBeenCalledWith({
     key,
@@ -350,7 +349,7 @@ test('restore with cache found for restore key', async () => {
   expect(downloadCacheMock).toHaveBeenCalledWith(
     signedDownloadUrl,
     archivePath,
-    options
+    {useS3: true}
   )
   expect(getArchiveFileSizeInBytesMock).toHaveBeenCalledWith(archivePath)
   expect(logInfoMock).toHaveBeenCalledWith(`Cache Size: ~0 MB (142 B)`)

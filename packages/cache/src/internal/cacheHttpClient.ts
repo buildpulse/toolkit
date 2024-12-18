@@ -150,8 +150,11 @@ export async function downloadCache(
   const archiveUrl = new URL(archiveLocation)
   const downloadOptions = getDownloadOptions(options)
 
-  // Check if the URL is an S3 URL (either direct or pre-signed)
-  if (archiveUrl.hostname.includes('s3') || archiveUrl.hostname.endsWith('amazonaws.com')) {
+  // Only use S3 SDK if explicitly enabled and URL is an S3 endpoint
+  if (
+    downloadOptions.useS3 &&
+    (archiveUrl.hostname.includes('s3') || archiveUrl.hostname.endsWith('amazonaws.com'))
+  ) {
     // Use S3 SDK for improved download performance
     await downloadCacheStorageSDK(archiveLocation, archivePath, downloadOptions)
   } else if (downloadOptions.concurrentBlobDownloads) {
