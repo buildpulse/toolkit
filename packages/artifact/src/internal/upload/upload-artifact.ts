@@ -5,21 +5,15 @@ import {
 } from '../shared/interfaces'
 import {getExpiration} from './retention'
 import {validateArtifactName} from './path-and-artifact-name-validation'
-import {internalArtifactTwirpClient} from '../shared/artifact-twirp-client'
+import {S3ArtifactManager} from '../s3/artifact-manager'
 import {
   UploadZipSpecification,
   getUploadZipSpecification,
   validateRootDirectory
 } from './upload-zip-specification'
-import {getBackendIdsFromToken} from '../shared/util'
-import {uploadZipToBlobStorage} from './blob-upload'
+import {getS3Config} from '../shared/config'
 import {createZipUploadStream} from './zip'
-import {
-  CreateArtifactRequest,
-  FinalizeArtifactRequest,
-  StringValue
-} from '../../generated'
-import {FilesNotFoundError, InvalidResponseError} from '../shared/errors'
+import {FilesNotFoundError} from '../shared/errors'
 
 export async function uploadArtifact(
   name: string,
@@ -40,76 +34,40 @@ export async function uploadArtifact(
     )
   }
 
-  // get the IDs needed for the artifact creation
-  const backendIds = getBackendIdsFromToken()
+  // Create S3 artifact manager
+  const s3Config = getS3Config()
+  const artifactManager = new S3ArtifactManager(s3Config)
 
-  // create the artifact client
-  const artifactClient = internalArtifactTwirpClient()
+  // Create the artifact and get upload URL
+  const {uploadUrl, key} = await artifactManager.createArtifact(name)
 
-  // create the artifact
-  const createArtifactReq: CreateArtifactRequest = {
-    workflowRunBackendId: backendIds.workflowRunBackendId,
-    workflowJobRunBackendId: backendIds.workflowJobRunBackendId,
-    name,
-    version: 4
-  }
-
-  // if there is a retention period, add it to the request
-  const expiresAt = getExpiration(options?.retentionDays)
-  if (expiresAt) {
-    createArtifactReq.expiresAt = expiresAt
-  }
-
-  const createArtifactResp =
-    await artifactClient.CreateArtifact(createArtifactReq)
-  if (!createArtifactResp.ok) {
-    throw new InvalidResponseError(
-      'CreateArtifact: response from backend was not ok'
-    )
-  }
-
+  // Create zip stream for upload
   const zipUploadStream = await createZipUploadStream(
     zipSpecification,
     options?.compressionLevel
   )
 
-  // Upload zip to blob storage
-  const uploadResult = await uploadZipToBlobStorage(
-    createArtifactResp.signedUploadUrl,
+  // Upload zip to S3
+  const uploadResult = await artifactManager.uploadArtifact(
+    uploadUrl,
     zipUploadStream
   )
 
-  // finalize the artifact
-  const finalizeArtifactReq: FinalizeArtifactRequest = {
-    workflowRunBackendId: backendIds.workflowRunBackendId,
-    workflowJobRunBackendId: backendIds.workflowJobRunBackendId,
+  // Finalize the artifact with metadata
+  const metadata = {
     name,
-    size: uploadResult.uploadSize ? uploadResult.uploadSize.toString() : '0'
+    size: uploadResult.uploadSize || 0,
+    hash: uploadResult.sha256Hash ? `sha256:${uploadResult.sha256Hash}` : undefined
   }
 
-  if (uploadResult.sha256Hash) {
-    finalizeArtifactReq.hash = StringValue.create({
-      value: `sha256:${uploadResult.sha256Hash}`
-    })
-  }
+  const finalizedArtifact = await artifactManager.finalizeArtifact(key, metadata)
 
-  core.info(`Finalizing artifact upload`)
-
-  const finalizeArtifactResp =
-    await artifactClient.FinalizeArtifact(finalizeArtifactReq)
-  if (!finalizeArtifactResp.ok) {
-    throw new InvalidResponseError(
-      'FinalizeArtifact: response from backend was not ok'
-    )
-  }
-
-  const artifactId = BigInt(finalizeArtifactResp.artifactId)
   core.info(
-    `Artifact ${name}.zip successfully finalized. Artifact ID ${artifactId}`
+    `Artifact ${name}.zip successfully uploaded to S3. Key: ${finalizedArtifact.key}`
   )
 
   return {
     size: uploadResult.uploadSize,
-    id: Number(artifactId)
+    id: Date.now() // Use timestamp as ID since we no longer have GitHub artifact IDs
   }
 }

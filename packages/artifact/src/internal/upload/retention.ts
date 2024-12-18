@@ -1,34 +1,23 @@
-import {Timestamp} from '../../generated'
-import * as core from '@actions/core'
-
-export function getExpiration(retentionDays?: number): Timestamp | undefined {
+/**
+ * Returns a Date object for when the artifact should expire based on the retention days.
+ * Returns undefined if the retention days is undefined or not a valid number between 1 and 90.
+ * @param retentionDays number of days to retain the artifact
+ */
+export function getExpiration(retentionDays?: number): Date | undefined {
   if (!retentionDays) {
     return undefined
   }
 
-  const maxRetentionDays = getRetentionDays()
-  if (maxRetentionDays && maxRetentionDays < retentionDays) {
-    core.warning(
-      `Retention days cannot be greater than the maximum allowed retention set within the repository. Using ${maxRetentionDays} instead.`
-    )
-    retentionDays = maxRetentionDays
+  const retentionDaysInt = parseInt(retentionDays.toString())
+  if (
+    Number.isNaN(retentionDaysInt) ||
+    retentionDaysInt < 1 ||
+    retentionDaysInt > 90
+  ) {
+    return undefined
   }
 
   const expirationDate = new Date()
-  expirationDate.setDate(expirationDate.getDate() + retentionDays)
-
-  return Timestamp.fromDate(expirationDate)
-}
-
-function getRetentionDays(): number | undefined {
-  const retentionDays = process.env['GITHUB_RETENTION_DAYS']
-  if (!retentionDays) {
-    return undefined
-  }
-  const days = parseInt(retentionDays)
-  if (isNaN(days)) {
-    return undefined
-  }
-
-  return days
+  expirationDate.setDate(expirationDate.getDate() + retentionDaysInt)
+  return expirationDate
 }
