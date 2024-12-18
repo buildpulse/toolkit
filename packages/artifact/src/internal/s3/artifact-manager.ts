@@ -109,7 +109,8 @@ export class S3ArtifactManager {
             })
           )
           return {
-            success: true
+            success: true,
+            id: parseInt(artifactId, 10)
           }
         } catch (error) {
           throw new Error(`Failed to delete artifact: ${error}`)
@@ -161,10 +162,16 @@ export class S3ArtifactManager {
   async uploadArtifact(
     key: string,
     stream: Readable
-  ): Promise<{uploadSize?: number; sha256Hash?: string}> {
+  ): Promise<{uploadSize?: number; sha256Hash?: string; uploadId?: string}> {
     return retry(
       async () => {
         try {
+          const command = new CreateMultipartUploadCommand({
+            Bucket: this.bucket,
+            Key: key
+          })
+          const {UploadId} = await this.s3Client.send(command)
+
           const upload = new Upload({
             client: this.s3Client,
             params: {
@@ -185,7 +192,8 @@ export class S3ArtifactManager {
 
           return {
             uploadSize: headResponse.ContentLength,
-            sha256Hash: headResponse.ETag?.replace(/"/g, '')
+            sha256Hash: headResponse.ETag?.replace(/"/g, ''),
+            uploadId: UploadId
           }
         } catch (error) {
           throw new S3UploadError(
@@ -200,14 +208,15 @@ export class S3ArtifactManager {
     )
   }
 
-  async finalizeArtifact(key: string): Promise<void> {
+  async finalizeArtifact(key: string, uploadId: string): Promise<void> {
     return retry(
       async () => {
         try {
           await this.s3Client.send(
             new CompleteMultipartUploadCommand({
               Bucket: this.bucket,
-              Key: key
+              Key: key,
+              UploadId: uploadId
             })
           )
         } catch (error) {

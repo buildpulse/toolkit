@@ -58,7 +58,12 @@ export async function uploadArtifact(
   )
 
   // Finalize the artifact
-  await artifactManager.finalizeArtifact(`artifacts/${artifactId}/${name}`)
+  if (uploadResult.uploadId) {
+    await artifactManager.finalizeArtifact(
+      `artifacts/${artifactId}/${name}`,
+      uploadResult.uploadId
+    )
+  }
 
   core.info(
     `Artifact ${name} successfully uploaded to S3. ID: ${artifactId}`
