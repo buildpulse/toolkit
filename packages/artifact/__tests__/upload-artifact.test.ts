@@ -3,7 +3,7 @@ import * as zip from '../src/internal/upload/zip'
 import * as util from '../src/internal/shared/util'
 import * as config from '../src/internal/shared/config'
 import {ArtifactServiceClientJSON} from '../src/generated'
-import * as blobUpload from '../src/internal/upload/blob-upload'
+import * as s3Upload from '../src/internal/upload/s3-upload'
 import {uploadArtifact} from '../src/internal/upload/upload-artifact'
 import {noopLogs} from './common'
 import {FilesNotFoundError} from '../src/internal/shared/errors'
@@ -11,6 +11,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import unzip from 'unzip-stream'
 import {
+  S3Client,
   CreateMultipartUploadCommand,
   UploadPartCommand,
   CompleteMultipartUploadCommand
@@ -128,13 +129,9 @@ describe('upload-artifact', () => {
         fixtures.files.map(file => ({
           sourcePath: path.join(fixtures.uploadDirectory, file.name),
           destinationPath: file.name,
-          stats: new fs.Stats()
+          stats: fs.statSync(path.join(fixtures.uploadDirectory, file.name))
         }))
       )
-    jest.spyOn(config, 'getRuntimeToken').mockReturnValue(fixtures.runtimeToken)
-    jest
-      .spyOn(config, 'getResultsServiceUrl')
-      .mockReturnValue(fixtures.resultsServiceURL)
   })
 
   afterEach(() => {
@@ -197,7 +194,7 @@ describe('upload-artifact', () => {
         })
       )
     jest
-      .spyOn(blobUpload, 'uploadZipToBlobStorage')
+      .spyOn(s3Upload, 'uploadZipToS3')
       .mockReturnValue(Promise.reject(new Error('S3 upload failed')))
 
     const uploadResp = uploadArtifact(
@@ -221,7 +218,7 @@ describe('upload-artifact', () => {
           signedUploadUrl: 'https://signed-upload-url.com'
         })
       )
-    jest.spyOn(blobUpload, 'uploadZipToBlobStorage').mockReturnValue(
+    jest.spyOn(s3Upload, 'uploadZipToS3').mockReturnValue(
       Promise.resolve({
         uploadSize: 1234,
         sha256Hash: 'test-sha256-hash'
