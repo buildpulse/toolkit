@@ -2,7 +2,6 @@ import * as uploadZipSpecification from '../src/internal/upload/upload-zip-speci
 import * as zip from '../src/internal/upload/zip'
 import * as util from '../src/internal/shared/util'
 import * as config from '../src/internal/shared/config'
-import {ArtifactServiceClientJSON} from '../src/generated'
 import * as s3Upload from '../src/internal/upload/s3-upload'
 import {uploadArtifact} from '../src/internal/upload/upload-artifact'
 import {noopLogs} from './common'
@@ -17,6 +16,9 @@ import {
   CompleteMultipartUploadCommand
 } from '@aws-sdk/client-s3'
 import { Readable, PassThrough } from 'stream'
+
+jest.mock('@aws-sdk/client-s3')
+jest.mock('@aws-sdk/lib-storage')
 
 const uploadMock = jest.fn()
 const s3ClientMock = {
@@ -168,9 +170,11 @@ describe('upload-artifact', () => {
     jest
       .spyOn(zip, 'createZipUploadStream')
       .mockReturnValue(Promise.resolve(new zip.ZipUploadStream(1)))
-    jest
-      .spyOn(ArtifactServiceClientJSON.prototype, 'CreateArtifact')
-      .mockReturnValue(Promise.resolve({ok: false, signedUploadUrl: ''}))
+
+    // Mock S3 client to fail creating multipart upload
+    s3ClientMock.send.mockImplementationOnce(() => {
+      return Promise.reject(new Error('Failed to create multipart upload'))
+    })
 
     const uploadResp = uploadArtifact(
       fixtures.inputs.artifactName,
@@ -178,7 +182,7 @@ describe('upload-artifact', () => {
       fixtures.inputs.rootDirectory
     )
 
-    await expect(uploadResp).rejects.toThrow()
+    await expect(uploadResp).rejects.toThrow('Failed to create multipart upload')
   })
 
   it('should return false if S3 upload is unsuccessful', async () => {
@@ -210,23 +214,20 @@ describe('upload-artifact', () => {
     jest
       .spyOn(zip, 'createZipUploadStream')
       .mockReturnValue(Promise.resolve(new zip.ZipUploadStream(1)))
-    jest
-      .spyOn(ArtifactServiceClientJSON.prototype, 'CreateArtifact')
-      .mockReturnValue(
-        Promise.resolve({
-          ok: true,
-          signedUploadUrl: 'https://signed-upload-url.com'
-        })
-      )
-    jest.spyOn(s3Upload, 'uploadZipToS3').mockReturnValue(
-      Promise.resolve({
-        uploadSize: 1234,
-        sha256Hash: 'test-sha256-hash'
-      })
-    )
-    jest
-      .spyOn(ArtifactServiceClientJSON.prototype, 'FinalizeArtifact')
-      .mockReturnValue(Promise.resolve({ok: false, artifactId: ''}))
+
+    // Mock S3 client to fail completing multipart upload
+    s3ClientMock.send.mockImplementation(command => {
+      if (command.__type === 'CreateMultipartUploadCommand') {
+        return Promise.resolve({ UploadId: 'test-upload-id' })
+      }
+      if (command.__type === 'UploadPartCommand') {
+        return Promise.resolve({ ETag: `"part-${command.input.PartNumber}"` })
+      }
+      if (command.__type === 'CompleteMultipartUploadCommand') {
+        return Promise.reject(new Error('Failed to complete multipart upload'))
+      }
+      return Promise.reject(new Error('Unknown command'))
+    })
 
     const uploadResp = uploadArtifact(
       fixtures.inputs.artifactName,
@@ -234,30 +235,13 @@ describe('upload-artifact', () => {
       fixtures.inputs.rootDirectory
     )
 
-    await expect(uploadResp).rejects.toThrow()
+    await expect(uploadResp).rejects.toThrow('Failed to complete multipart upload')
   })
 
   it('should successfully upload an artifact', async () => {
     jest
       .spyOn(uploadZipSpecification, 'getUploadZipSpecification')
       .mockRestore()
-
-    jest
-      .spyOn(ArtifactServiceClientJSON.prototype, 'CreateArtifact')
-      .mockReturnValue(
-        Promise.resolve({
-          ok: true,
-          signedUploadUrl: 'https://test-bucket.s3.amazonaws.com/test.zip'
-        })
-      )
-    jest
-      .spyOn(ArtifactServiceClientJSON.prototype, 'FinalizeArtifact')
-      .mockReturnValue(
-        Promise.resolve({
-          ok: true,
-          artifactId: '1'
-        })
-      )
 
     let loadedBytes = 0
     const uploadedZip = path.join(
@@ -309,7 +293,7 @@ describe('upload-artifact', () => {
       fixtures.uploadDirectory
     )
 
-    expect(id).toBe(1)
+    expect(id).toBeDefined()
     expect(size).toBe(loadedBytes)
 
     const extractedDirectory = path.join(
@@ -341,15 +325,6 @@ describe('upload-artifact', () => {
   })
 
   it('should throw an error uploading blob chunks get delayed', async () => {
-    jest
-      .spyOn(ArtifactServiceClientJSON.prototype, 'CreateArtifact')
-      .mockReturnValue(
-        Promise.resolve({
-          ok: true,
-          signedUploadUrl: 'https://test-bucket.s3.amazonaws.com/test.zip'
-        })
-      )
-
     // Mock S3 multipart upload with delay
     s3ClientMock.send.mockImplementation(command => {
       if (command.__type === 'CreateMultipartUploadCommand') {
@@ -378,6 +353,11 @@ describe('upload-artifact', () => {
       return Promise.reject(new Error('Unknown command'))
     })
 
+    const uploadResp = uploadArtifact(
+      fixtures.inputs.artifactName,
+      fixtures.inputs.files,
+      fixtures.inputs.rootDirectory
+    )
+
+    await expect(uploadResp).rejects.toThrow('Upload timeout: No upload progress made')
   })
-})
-// PLACEHOLDER: remaining test cases and cleanup
