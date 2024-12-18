@@ -1,17 +1,17 @@
 import * as core from '@actions/core'
 import {
-  BlobClient,
-  BlobUploadCommonResponse,
-  BlockBlobClient,
-  BlockBlobParallelUploadOptions
-} from '@azure/storage-blob'
-import {TransferProgressEvent} from '@azure/ms-rest-js'
+  S3Client,
+  PutObjectCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommandOutput
+} from '@aws-sdk/client-s3'
+import * as fs from 'fs'
 import {InvalidResponseError} from './shared/errors'
 import {UploadOptions} from '../options'
+import {S3Utils, S3UploadProgress} from './s3Utils'
 
-/**
- * Class for tracking the upload state and displaying stats.
- */
 export class UploadProgress {
   contentLength: number
   sentBytes: number
@@ -26,33 +26,18 @@ export class UploadProgress {
     this.startTime = Date.now()
   }
 
-  /**
-   * Sets the number of bytes sent
-   *
-   * @param sentBytes the number of bytes sent
-   */
   setSentBytes(sentBytes: number): void {
     this.sentBytes = sentBytes
   }
 
-  /**
-   * Returns the total number of bytes transferred.
-   */
   getTransferredBytes(): number {
     return this.sentBytes
   }
 
-  /**
-   * Returns true if the upload is complete.
-   */
   isDone(): boolean {
     return this.getTransferredBytes() === this.contentLength
   }
 
-  /**
-   * Prints the current upload stats. Once the upload completes, this will print one
-   * last line and then stop.
-   */
   display(): void {
     if (this.displayedComplete) {
       return
@@ -78,20 +63,12 @@ export class UploadProgress {
     }
   }
 
-  /**
-   * Returns a function used to handle TransferProgressEvents.
-   */
-  onProgress(): (progress: TransferProgressEvent) => void {
-    return (progress: TransferProgressEvent) => {
+  onProgress(): (progress: S3UploadProgress) => void {
+    return (progress: S3UploadProgress) => {
       this.setSentBytes(progress.loadedBytes)
     }
   }
 
-  /**
-   * Starts the timer that displays the stats.
-   *
-   * @param delayInMs the delay between each write
-   */
   startDisplayTimer(delayInMs = 1000): void {
     const displayCallback = (): void => {
       this.display()
@@ -104,11 +81,6 @@ export class UploadProgress {
     this.timeoutHandle = setTimeout(displayCallback, delayInMs)
   }
 
-  /**
-   * Stops the timer that displays the stats. As this typically indicates the upload
-   * is complete, this will display one last line, unless the last line has already
-   * been written.
-   */
   stopDisplayTimer(): void {
     if (this.timeoutHandle) {
       clearTimeout(this.timeoutHandle)
@@ -119,53 +91,91 @@ export class UploadProgress {
   }
 }
 
-/**
- * Uploads a cache archive directly to Azure Blob Storage using the Azure SDK.
- * This function will display progress information to the console. Concurrency of the
- * upload is determined by the calling functions.
- *
- * @param signedUploadURL
- * @param archivePath
- * @param options
- * @returns
- */
 export async function uploadCacheArchiveSDK(
   signedUploadURL: string,
   archivePath: string,
   options?: UploadOptions
-): Promise<BlobUploadCommonResponse> {
-  const blobClient: BlobClient = new BlobClient(signedUploadURL)
-  const blockBlobClient: BlockBlobClient = blobClient.getBlockBlobClient()
+): Promise<CompleteMultipartUploadCommandOutput> {
+  const s3Utils = new S3Utils()
+  const s3Client = s3Utils.getClient()
   const uploadProgress = new UploadProgress(options?.archiveSizeBytes ?? 0)
-
-  // Specify data transfer options
-  const uploadOptions: BlockBlobParallelUploadOptions = {
-    blockSize: options?.uploadChunkSize,
-    concurrency: options?.uploadConcurrency, // maximum number of parallel transfer workers
-    maxSingleShotSize: 128 * 1024 * 1024, // 128 MiB initial transfer size
-    onProgress: uploadProgress.onProgress()
-  }
+  const fileSize = fs.statSync(archivePath).size
+  const chunkSize = options?.uploadChunkSize ?? 5 * 1024 * 1024
+  const maxConcurrency = options?.uploadConcurrency ?? 4
 
   try {
     uploadProgress.startDisplayTimer()
 
-    core.debug(
-      `BlobClient: ${blobClient.name}:${blobClient.accountName}:${blobClient.containerName}`
+    const url = new URL(signedUploadURL)
+    const bucket = url.hostname.split('.')[0]
+    const key = url.pathname.substring(1)
+
+    const createMultipartUpload = await s3Client.send(
+      new CreateMultipartUploadCommand({
+        Bucket: bucket,
+        Key: key
+      })
     )
 
-    const response = await blockBlobClient.uploadFile(
-      archivePath,
-      uploadOptions
-    )
-
-    // TODO: better management of non-retryable errors
-    if (response._response.status >= 400) {
-      throw new InvalidResponseError(
-        `uploadCacheArchiveSDK: upload failed with status code ${response._response.status}`
-      )
+    const uploadId = createMultipartUpload.UploadId
+    if (!uploadId) {
+      throw new Error('Failed to get upload ID from S3')
     }
 
-    return response
+    const numParts = Math.ceil(fileSize / chunkSize)
+    const uploadPromises: Promise<void>[] = []
+    const uploadedParts: { PartNumber: number; ETag: string }[] = []
+
+    for (let i = 0; i < numParts; i++) {
+      const start = i * chunkSize
+      const end = Math.min(start + chunkSize, fileSize)
+      const partNumber = i + 1
+
+      const chunk = fs.createReadStream(archivePath, { start, end: end - 1 })
+
+      const uploadPartCommand = new UploadPartCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: uploadId,
+        PartNumber: partNumber,
+        Body: chunk
+      })
+
+      uploadPromises.push(
+        s3Client.send(uploadPartCommand).then(response => {
+          if (!response.ETag) {
+            throw new Error(`Failed to get ETag for part ${partNumber}`)
+          }
+          uploadedParts.push({
+            PartNumber: partNumber,
+            ETag: response.ETag
+          })
+          uploadProgress.setSentBytes(
+            Math.min(uploadProgress.getTransferredBytes() + chunkSize, fileSize)
+          )
+        })
+      )
+
+      if (uploadPromises.length >= maxConcurrency) {
+        await Promise.all(uploadPromises)
+        uploadPromises.length = 0
+      }
+    }
+
+    await Promise.all(uploadPromises)
+
+    const completeMultipartUpload = await s3Client.send(
+      new CompleteMultipartUploadCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: uploadId,
+        MultipartUpload: {
+          Parts: uploadedParts.sort((a, b) => a.PartNumber - b.PartNumber)
+        }
+      })
+    )
+
+    return completeMultipartUpload
   } catch (error) {
     core.warning(
       `uploadCacheArchiveSDK: internal error uploading cache archive: ${error.message}`
