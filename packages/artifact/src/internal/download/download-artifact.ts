@@ -30,26 +30,16 @@ async function exists(path: string): Promise<boolean> {
 
 export async function streamExtract(
   url: string,
-  directory: string,
-  retryCount = 5
+  directory: string
 ): Promise<void> {
-  let lastError: Error | undefined
-  for (let attempt = 1; attempt <= retryCount; attempt++) {
-    try {
-      await streamExtractExternal(url, directory)
-      return
-    } catch (error) {
-      lastError = error as Error
-      if (attempt < retryCount) {
-        await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000))
-      }
+  try {
+    await streamExtractExternal(url, directory)
+  } catch (error) {
+    if (error instanceof NetworkError) {
+      throw error
     }
+    throw new Error(`Failed to download artifact: ${error instanceof Error ? error.message : String(error)}`)
   }
-
-  if (lastError instanceof NetworkError) {
-    throw new NetworkError('NetworkingError', `Network error during download: ${lastError.message}`)
-  }
-  throw new Error(`Failed to download artifact after ${retryCount} attempts: ${lastError?.message}`)
 }
 
 export async function streamExtractExternal(
@@ -113,8 +103,9 @@ export async function downloadArtifact(
   options: DownloadArtifactOptions = {}
 ): Promise<DownloadArtifactResponse> {
   const artifactManager = getArtifactManager()
-  const maxRetries = 3
-  const retryDelayMs = 500
+  const maxRetries = 5
+  const retryDelayMs = 1000
+  const downloadTimeout = 5 * 60 * 1000 // 5 minutes
 
   try {
     const artifact = await artifactManager.getArtifact(artifactId.toString())
@@ -123,19 +114,26 @@ export async function downloadArtifact(
     }
 
     const downloadPath = await resolveOrCreateDirectory(options.path)
+    const timeoutPromise = new Promise<DownloadArtifactResponse>((_, reject) => {
+      setTimeout(() => reject(new Error('Download timeout exceeded')), downloadTimeout)
+    })
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const downloadUrl = await artifactManager.getSignedDownloadUrl(artifactId.toString())
-        await streamExtract(downloadUrl, downloadPath)
-        return {
-          downloadPath,
-          artifact
-        }
+        const downloadPromise = (async (): Promise<DownloadArtifactResponse> => {
+          const downloadUrl = await artifactManager.getSignedDownloadUrl(artifactId.toString())
+          await streamExtract(downloadUrl, downloadPath)
+          return {
+            downloadPath,
+            artifact
+          }
+        })()
+
+        return await Promise.race([downloadPromise, timeoutPromise])
       } catch (error) {
-        if (error instanceof NetworkError) {
+        if (error instanceof NetworkError || (error instanceof Error && error.message === 'Download timeout exceeded')) {
           if (attempt === maxRetries) {
-            throw new NetworkError('NetworkingError', 'Unknown network error occurred')
+            throw new NetworkError('NetworkingError', `Failed to download after ${maxRetries} attempts: ${error.message}`)
           }
           await new Promise(resolve => setTimeout(resolve, retryDelayMs * Math.pow(2, attempt - 1)))
           continue
@@ -144,13 +142,12 @@ export async function downloadArtifact(
       }
     }
 
-    // This should never happen due to the retry logic above, but TypeScript needs it
     throw new Error('Unexpected error during download')
   } catch (error) {
     if (error instanceof NetworkError) {
       throw error
     }
-    if (error.message === 'Artifact not found') {
+    if (error instanceof Error && error.message === 'Artifact not found') {
       throw new Error('No artifacts found for ID')
     }
     throw new Error(`Unable to download and extract artifact: ${error instanceof Error ? error.message : String(error)}`)

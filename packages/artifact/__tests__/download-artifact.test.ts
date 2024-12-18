@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import {NetworkError} from '../src/internal/shared/errors'
 import {downloadArtifact} from '../src/internal/download/download-artifact'
 import {IS3ArtifactManager} from '../src/internal/s3/types'
+import {streamExtractExternal} from '../src/internal/download/stream-extract'
 
 const fixtures = {
   artifactID: 12345,
@@ -38,6 +39,14 @@ mockS3ArtifactManager.clone.mockResolvedValue({...mockS3ArtifactManager})
 
 jest.mock('../src/internal/shared/util', () => ({
   getArtifactManager: () => mockS3ArtifactManager
+}))
+
+// Mock the external module that contains streamExtractExternal
+jest.mock('../src/internal/download/stream-extract', () => ({
+  streamExtractExternal: jest.fn().mockImplementation(async (url: string, path: string) => {
+    // Simulate successful download and extraction
+    return Promise.resolve()
+  })
 }))
 
 describe('downloadArtifact', () => {
