@@ -7,22 +7,26 @@ import * as blobUpload from '../src/internal/upload/blob-upload'
 import {uploadArtifact} from '../src/internal/upload/upload-artifact'
 import {noopLogs} from './common'
 import {FilesNotFoundError} from '../src/internal/shared/errors'
-import {BlockBlobUploadStreamOptions} from '@azure/storage-blob'
 import * as fs from 'fs'
 import * as path from 'path'
 import unzip from 'unzip-stream'
 
-const uploadStreamMock = jest.fn()
-const blockBlobClientMock = jest.fn().mockImplementation(() => ({
-  uploadStream: uploadStreamMock
+const uploadMock = jest.fn()
+const s3ClientMock = {
+  send: jest.fn()
+}
+
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest.fn().mockImplementation(() => s3ClientMock),
+  CreateMultipartUploadCommand: jest.fn(),
+  UploadPartCommand: jest.fn(),
+  CompleteMultipartUploadCommand: jest.fn()
 }))
 
-jest.mock('@azure/storage-blob', () => ({
-  BlobClient: jest.fn().mockImplementation(() => {
-    return {
-      getBlockBlobClient: blockBlobClientMock
-    }
-  })
+jest.mock('@aws-sdk/lib-storage', () => ({
+  Upload: jest.fn().mockImplementation(() => ({
+    done: uploadMock
+  }))
 }))
 
 const fixtures = {
@@ -164,7 +168,7 @@ describe('upload-artifact', () => {
     await expect(uploadResp).rejects.toThrow()
   })
 
-  it('should return false if blob storage upload is unsuccessful', async () => {
+  it('should return false if S3 upload is unsuccessful', async () => {
     jest
       .spyOn(zip, 'createZipUploadStream')
       .mockReturnValue(Promise.resolve(new zip.ZipUploadStream(1)))
@@ -178,7 +182,7 @@ describe('upload-artifact', () => {
       )
     jest
       .spyOn(blobUpload, 'uploadZipToBlobStorage')
-      .mockReturnValue(Promise.reject(new Error('boom')))
+      .mockReturnValue(Promise.reject(new Error('S3 upload failed')))
 
     const uploadResp = uploadArtifact(
       fixtures.inputs.artifactName,
@@ -248,38 +252,30 @@ describe('upload-artifact', () => {
       '..',
       'uploaded.zip'
     )
-    uploadStreamMock.mockImplementation(
-      async (
-        stream: NodeJS.ReadableStream,
-        bufferSize?: number,
-        maxConcurrency?: number,
-        options?: BlockBlobUploadStreamOptions
-      ) => {
-        const {onProgress} = options || {}
 
-        if (fs.existsSync(uploadedZip)) {
-          fs.unlinkSync(uploadedZip)
-        }
-        const uploadedZipStream = fs.createWriteStream(uploadedZip)
+    // Mock S3 upload behavior
+    uploadMock.mockImplementation(async () => {
+      if (fs.existsSync(uploadedZip)) {
+        fs.unlinkSync(uploadedZip)
+      }
+      const uploadedZipStream = fs.createWriteStream(uploadedZip)
 
-        onProgress?.({loadedBytes: 0})
-        return new Promise((resolve, reject) => {
-          stream.on('data', chunk => {
-            loadedBytes += chunk.length
-            uploadedZipStream.write(chunk)
-            onProgress?.({loadedBytes})
-          })
-          stream.on('end', () => {
-            onProgress?.({loadedBytes})
-            uploadedZipStream.end()
-            resolve({})
-          })
-          stream.on('error', err => {
-            reject(err)
+      return new Promise((resolve, reject) => {
+        const stream = s3ClientMock.send.mock.calls[0][0].Body
+        stream.on('data', chunk => {
+          loadedBytes += chunk.length
+          uploadedZipStream.write(chunk)
+        })
+        stream.on('end', () => {
+          uploadedZipStream.end()
+          resolve({
+            Location: 'https://s3-bucket.amazonaws.com/test.zip',
+            ETag: '"test-etag"'
           })
         })
-      }
-    )
+        stream.on('error', reject)
+      })
+    })
 
     const {id, size} = await uploadArtifact(
       fixtures.inputs.artifactName,
@@ -343,22 +339,13 @@ describe('upload-artifact', () => {
 
     jest.spyOn(config, 'getUploadChunkTimeout').mockReturnValue(2_000)
 
-    uploadStreamMock.mockImplementation(
-      async (
-        stream: NodeJS.ReadableStream,
-        bufferSize?: number,
-        maxConcurrency?: number,
-        options?: BlockBlobUploadStreamOptions
-      ) => {
-        const {onProgress, abortSignal} = options || {}
-        onProgress?.({loadedBytes: 0})
-        return new Promise(resolve => {
-          abortSignal?.addEventListener('abort', () => {
-            resolve({})
-          })
-        })
-      }
-    )
+    // Mock S3 upload to simulate a stalled upload
+    uploadMock.mockImplementation(async () => {
+      return new Promise(resolve => {
+        // Never resolve to simulate a stalled upload
+        setTimeout(() => {}, 10000)
+      })
+    })
 
     const uploadResp = uploadArtifact(
       fixtures.inputs.artifactName,
