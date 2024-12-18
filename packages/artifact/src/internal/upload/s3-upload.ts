@@ -1,4 +1,3 @@
-import * as core from '@actions/core'
 import {
   S3Client,
   PutObjectCommand,
@@ -7,7 +6,7 @@ import {
   UploadPartCommand
 } from '@aws-sdk/client-s3'
 import { ZipUploadStream } from './zip'
-import { BlobUploadResponse } from './blob-upload'
+import { S3UploadResponse } from './s3-types'
 import { S3UploadError } from '../shared/errors'
 import * as crypto from 'crypto'
 import * as stream from 'stream'
@@ -15,7 +14,7 @@ import * as stream from 'stream'
 export async function uploadZipToS3(
   signedUrl: string,
   zipUploadStream: ZipUploadStream
-): Promise<BlobUploadResponse> {
+): Promise<S3UploadResponse> {
   const s3Client = new S3Client({})
   const chunkSize = 5 * 1024 * 1024 // 5MB chunks
   const maxConcurrency = 4
@@ -118,7 +117,7 @@ export async function uploadZipToS3(
       }
 
       uploadSize += chunk.length
-      core.info(`Uploaded bytes ${uploadSize}`)
+      console.log(`Uploaded bytes ${uploadSize}`)
 
       try {
         const uploadPartCommand = new UploadPartCommand({
@@ -196,7 +195,7 @@ export async function uploadZipToS3(
     // Get the SHA256 hash
     hashStream.end()
     const sha256Hash = hashStream.read() as string
-    core.info(`SHA256 hash of uploaded artifact zip is ${sha256Hash}`)
+    console.log(`SHA256 hash of uploaded artifact zip is ${sha256Hash}`)
 
     if (uploadSize === 0) {
       throw new S3UploadError('No data was uploaded to S3', 'ZERO_BYTES_UPLOADED')
