@@ -1,3 +1,5 @@
+import * as core from '@actions/core'
+
 export function isGhes(): boolean {
   const ghUrl = new URL(
     process.env['GITHUB_SERVER_URL'] || 'https://github.com'
@@ -35,5 +37,33 @@ export function getCacheServiceURL(): string {
       return process.env['ACTIONS_RESULTS_URL'] || ''
     default:
       throw new Error(`Unsupported cache service version: ${version}`)
+  }
+}
+
+export function getS3Config(): {
+  bucket: string
+  region: string
+  endpoint?: string
+} {
+  const bucket = process.env['CACHE_S3_BUCKET']
+  if (!bucket) {
+    throw new Error(
+      'CACHE_S3_BUCKET environment variable is required for S3 cache storage'
+    )
+  }
+
+  const region = process.env['AWS_REGION'] || 'us-east-1'
+  const endpoint = process.env['AWS_ENDPOINT']
+
+  core.debug(`Using S3 bucket: ${bucket}`)
+  core.debug(`Using AWS region: ${region}`)
+  if (endpoint) {
+    core.debug(`Using custom S3 endpoint: ${endpoint}`)
+  }
+
+  return {
+    bucket,
+    region,
+    endpoint
   }
 }

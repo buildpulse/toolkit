@@ -150,26 +150,41 @@ export async function downloadCache(
   const archiveUrl = new URL(archiveLocation)
   const downloadOptions = getDownloadOptions(options)
 
-  if (archiveUrl.hostname.endsWith('.blob.core.windows.net')) {
-    if (downloadOptions.useAzureSdk) {
-      // Use Azure storage SDK to download caches hosted on Azure to improve speed and reliability.
-      await downloadCacheStorageSDK(
-        archiveLocation,
-        archivePath,
-        downloadOptions
-      )
-    } else if (downloadOptions.concurrentBlobDownloads) {
-      // Use concurrent implementation with HttpClient to work around blob SDK issue
+  // Check if URL is an Azure storage endpoint first
+  if (archiveUrl.hostname.includes('blob.core.windows.net')) {
+    // Use concurrent implementation for Azure blobs unless explicitly disabled
+    if (downloadOptions.concurrentBlobDownloads !== false) {
       await downloadCacheHttpClientConcurrent(
         archiveLocation,
         archivePath,
         downloadOptions
       )
-    } else {
-      // Otherwise, download using the Actions http-client.
-      await downloadCacheHttpClient(archiveLocation, archivePath)
+      return
     }
+  }
+
+  // If useS3 is explicitly set to false, use standard HTTP client
+  if (downloadOptions.useS3 === false) {
+    await downloadCacheHttpClient(archiveLocation, archivePath)
+    return
+  }
+
+  // Check if URL is an S3 endpoint
+  if (
+    downloadOptions.useS3 &&
+    (archiveUrl.hostname.includes('s3') || archiveUrl.hostname.endsWith('amazonaws.com'))
+  ) {
+    // Use S3 SDK for improved download performance
+    await downloadCacheStorageSDK(archiveLocation, archivePath, downloadOptions)
+  } else if (downloadOptions.concurrentBlobDownloads) {
+    // Use concurrent implementation for large files if enabled
+    await downloadCacheHttpClientConcurrent(
+      archiveLocation,
+      archivePath,
+      downloadOptions
+    )
   } else {
+    // Default to standard HTTP client download
     await downloadCacheHttpClient(archiveLocation, archivePath)
   }
 }
@@ -332,40 +347,37 @@ export async function saveCache(
 ): Promise<void> {
   const uploadOptions = getUploadOptions(options)
 
-  if (uploadOptions.useAzureSdk) {
-    // Use Azure storage SDK to upload caches directly to Azure
-    if (!signedUploadURL) {
-      throw new Error(
-        'Azure Storage SDK can only be used when a signed URL is provided.'
-      )
+  if (signedUploadURL) {
+    const uploadUrl = new URL(signedUploadURL)
+    // Check if the URL is an S3 URL (either direct or pre-signed)
+    if (uploadUrl.hostname.includes('s3') || uploadUrl.hostname.endsWith('amazonaws.com')) {
+      // Use S3 SDK for improved upload performance
+      await uploadCacheArchiveSDK(signedUploadURL, archivePath, options)
+    } else {
+      // Use standard HTTP client upload for non-S3 URLs
+      const httpClient = createHttpClient()
+      await uploadFile(httpClient, cacheId, archivePath, options)
     }
-    await uploadCacheArchiveSDK(signedUploadURL, archivePath, options)
   } else {
+    // If no signed URL provided, use standard HTTP client upload
     const httpClient = createHttpClient()
-
-    core.debug('Upload cache')
     await uploadFile(httpClient, cacheId, archivePath, options)
-
-    // Commit Cache
-    core.debug('Commiting cache')
-    const cacheSize = utils.getArchiveFileSizeInBytes(archivePath)
-    core.info(
-      `Cache Size: ~${Math.round(
-        cacheSize / (1024 * 1024)
-      )} MB (${cacheSize} B)`
-    )
-
-    const commitCacheResponse = await commitCache(
-      httpClient,
-      cacheId,
-      cacheSize
-    )
-    if (!isSuccessStatusCode(commitCacheResponse.statusCode)) {
-      throw new Error(
-        `Cache service responded with ${commitCacheResponse.statusCode} during commit cache.`
-      )
-    }
-
-    core.info('Cache saved successfully')
   }
+
+  // Commit Cache
+  const httpClient = createHttpClient()
+  core.debug('Commiting cache')
+  const cacheSize = utils.getArchiveFileSizeInBytes(archivePath)
+  core.info(
+    `Cache Size: ~${Math.round(cacheSize / (1024 * 1024))} MB (${cacheSize} B)`
+  )
+
+  const commitCacheResponse = await commitCache(httpClient, cacheId, cacheSize)
+  if (!isSuccessStatusCode(commitCacheResponse.statusCode)) {
+    throw new Error(
+      `Cache service responded with ${commitCacheResponse.statusCode} during commit cache.`
+    )
+  }
+
+  core.info('Cache saved successfully')
 }

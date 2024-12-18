@@ -6,6 +6,10 @@ import {DownloadOptions, getDownloadOptions} from '../src/options'
 
 jest.mock('../src/internal/downloadUtils')
 
+beforeEach(() => {
+  jest.clearAllMocks()
+})
+
 test('getCacheVersion does not mutate arguments', async () => {
   const paths = ['node_modules']
   getCacheVersion(paths, undefined, true)
@@ -69,8 +73,9 @@ test('downloadCache uses http-client for non-Azure URLs', async () => {
 
   const archiveLocation = 'http://www.actionscache.test/download'
   const archivePath = '/foo/bar'
+  const options = {useS3: false} as DownloadOptions
 
-  await downloadCache(archiveLocation, archivePath)
+  await downloadCache(archiveLocation, archivePath, options)
 
   expect(downloadCacheHttpClientMock).toHaveBeenCalledTimes(1)
   expect(downloadCacheHttpClientMock).toHaveBeenCalledWith(
@@ -158,7 +163,7 @@ test('downloadCache uses http-client when overridden', async () => {
   const archiveLocation = 'http://foo.blob.core.windows.net/bar/baz'
   const archivePath = '/foo/bar'
   const options: DownloadOptions = {
-    useAzureSdk: false,
+    useS3: false,
     concurrentBlobDownloads: false
   }
 

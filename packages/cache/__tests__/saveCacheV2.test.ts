@@ -141,7 +141,7 @@ test('save cache fails if a signedUploadURL was not passed', async () => {
   const archiveFileSize = 1024
   const options: UploadOptions = {
     archiveSizeBytes: archiveFileSize, // These should always match
-    useAzureSdk: true,
+    useS3: true,
     uploadChunkSize: 64 * 1024 * 1024,
     uploadConcurrency: 8
   }
@@ -199,7 +199,7 @@ test('finalize save cache failure', async () => {
   const archiveFileSize = 1024
   const options: UploadOptions = {
     archiveSizeBytes: archiveFileSize, // These should always match
-    useAzureSdk: true,
+    useS3: true,
     uploadChunkSize: 64 * 1024 * 1024,
     uploadConcurrency: 8
   }
@@ -273,7 +273,7 @@ test('save with valid inputs uploads a cache', async () => {
   const archiveFileSize = 1024
   const options: UploadOptions = {
     archiveSizeBytes: archiveFileSize, // These should always match
-    useAzureSdk: true,
+    useS3: true,
     uploadChunkSize: 64 * 1024 * 1024,
     uploadConcurrency: 8
   }
