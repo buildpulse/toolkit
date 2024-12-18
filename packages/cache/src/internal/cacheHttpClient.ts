@@ -150,7 +150,26 @@ export async function downloadCache(
   const archiveUrl = new URL(archiveLocation)
   const downloadOptions = getDownloadOptions(options)
 
-  // Only use S3 SDK if explicitly enabled and URL is an S3 endpoint
+  // Check if URL is an Azure storage endpoint first
+  if (archiveUrl.hostname.includes('blob.core.windows.net')) {
+    // Use concurrent implementation for Azure blobs unless explicitly disabled
+    if (downloadOptions.concurrentBlobDownloads !== false) {
+      await downloadCacheHttpClientConcurrent(
+        archiveLocation,
+        archivePath,
+        downloadOptions
+      )
+      return
+    }
+  }
+
+  // If useS3 is explicitly set to false, use standard HTTP client
+  if (downloadOptions.useS3 === false) {
+    await downloadCacheHttpClient(archiveLocation, archivePath)
+    return
+  }
+
+  // Check if URL is an S3 endpoint
   if (
     downloadOptions.useS3 &&
     (archiveUrl.hostname.includes('s3') || archiveUrl.hostname.endsWith('amazonaws.com'))
@@ -158,7 +177,7 @@ export async function downloadCache(
     // Use S3 SDK for improved download performance
     await downloadCacheStorageSDK(archiveLocation, archivePath, downloadOptions)
   } else if (downloadOptions.concurrentBlobDownloads) {
-    // Use concurrent implementation for large files
+    // Use concurrent implementation for large files if enabled
     await downloadCacheHttpClientConcurrent(
       archiveLocation,
       archivePath,

@@ -185,8 +185,7 @@ test('restore with gzip compressed cache found', async () => {
   expect(cacheKey).toBe(key)
   expect(getCacheVersionMock).toHaveBeenCalledWith(
     paths,
-    compressionMethod,
-    false
+    compressionMethod
   )
   expect(getCacheDownloadURLMock).toHaveBeenCalledWith({
     key,
@@ -261,8 +260,7 @@ test('restore with zstd compressed cache found', async () => {
   expect(cacheKey).toBe(key)
   expect(getCacheVersionMock).toHaveBeenCalledWith(
     paths,
-    compressionMethod,
-    false
+    compressionMethod
   )
   expect(getCacheDownloadURLMock).toHaveBeenCalledWith({
     key,
@@ -338,7 +336,7 @@ test('restore with cache found for restore key', async () => {
   expect(cacheKey).toBe(restoreKeys[0])
   expect(getCacheVersionMock).toHaveBeenCalledWith(
     paths,
-    compressionMethod,
+    compressionMethod
   )
   expect(getCacheDownloadURLMock).toHaveBeenCalledWith({
     key,
