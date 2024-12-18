@@ -20,6 +20,8 @@ export async function uploadZipToS3(
   const chunkSize = 5 * 1024 * 1024 // 5MB chunks
   const maxConcurrency = 4
   let uploadSize = 0
+  let lastProgressTime = Date.now()
+  const stallTimeout = 30000 // 30 seconds
 
   // Create hash stream for SHA256 calculation
   const hashStream = crypto.createHash('sha256')
@@ -65,6 +67,7 @@ export async function uploadZipToS3(
         const onData = (data: Buffer) => {
           chunks.push(data)
           size += data.length
+          lastProgressTime = Date.now()
 
           if (size >= chunkSize) {
             cleanup()
@@ -96,6 +99,18 @@ export async function uploadZipToS3(
         zipUploadStream.on('data', onData)
         zipUploadStream.on('end', onEnd)
         zipUploadStream.on('error', onError)
+
+        // Check for stalled upload
+        const checkStall = setInterval(() => {
+          if (Date.now() - lastProgressTime > stallTimeout) {
+            clearInterval(checkStall)
+            cleanup()
+            reject(new Error('Upload progress stalled.'))
+          }
+        }, 1000)
+
+        // Clean up stall checker on success
+        zipUploadStream.once('end', () => clearInterval(checkStall))
       })
 
       if (chunk.length === 0 && isStreamComplete) {
@@ -111,7 +126,7 @@ export async function uploadZipToS3(
           Key: key,
           UploadId: uploadId,
           PartNumber: partNumber,
-          Body: chunk
+          Body: Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
         })
 
         uploadPromises.push(
@@ -126,6 +141,7 @@ export async function uploadZipToS3(
               PartNumber: partNumber,
               ETag: response.ETag
             })
+            lastProgressTime = Date.now() // Update progress time after successful part upload
           })
         )
 
@@ -191,6 +207,9 @@ export async function uploadZipToS3(
       sha256Hash
     }
   } catch (error) {
+    if (error.message === 'Upload progress stalled.') {
+      throw error // Pass through stall errors directly
+    }
     if (S3UploadError.isS3Error(error)) {
       throw error
     }
