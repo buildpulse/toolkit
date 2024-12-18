@@ -32,12 +32,10 @@ const s3ClientMock = {
     endpoint: 'https://s3.amazonaws.com',
     endpointProvider: () => ({ url: 'https://s3.amazonaws.com' })
   },
-  clone: jest.fn().mockImplementation(function() {
-    return {
-      ...this,
-      clone: this.clone
-    }
-  })
+  clone: jest.fn().mockImplementation(() => ({
+    pipe: jest.fn().mockReturnThis(),
+    clone: jest.fn()
+  }))
 } as any
 
 // Helper function to create a readable stream from a buffer
@@ -64,7 +62,7 @@ jest.mock('@aws-sdk/client-s3', () => ({
 }))
 
 const fixtures = {
-  uploadDirectory: path.join(__dirname, '_temp', 'plz-upload'),
+  uploadDirectory: '/home/user/files/plz-upload',
   files: [
     {name: 'file1.txt', content: 'test 1 file content'},
     {name: 'file2.txt', content: 'test 2 file content'},
@@ -99,22 +97,27 @@ const fixtures = {
 
 describe('upload-artifact', () => {
   beforeAll(() => {
+    // Create test directory structure
     fs.mkdirSync(fixtures.uploadDirectory, { recursive: true })
+    fs.mkdirSync(path.join(fixtures.uploadDirectory, 'dir'), { recursive: true })
 
+    // Create test files
     for (const file of fixtures.files) {
+      const filePath = path.join(fixtures.uploadDirectory, file.name)
       if (file.symlink) {
         const targetPath = path.join(fixtures.uploadDirectory, file.symlink)
-        const symlinkPath = path.join(fixtures.uploadDirectory, file.name)
         fs.writeFileSync(targetPath, file.content)
+        try {
+          fs.unlinkSync(filePath)
+        } catch (error) {
+          // Ignore error if file doesn't exist
+        }
         fs.symlinkSync(
           file.relative ? path.basename(targetPath) : targetPath,
-          symlinkPath
+          filePath
         )
       } else {
-        fs.writeFileSync(
-          path.join(fixtures.uploadDirectory, file.name),
-          file.content
-        )
+        fs.writeFileSync(filePath, file.content)
       }
     }
   })

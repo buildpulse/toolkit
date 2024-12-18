@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import {info} from '@actions/core'
 import {normalize, resolve} from 'path'
 import {validateFilePath} from './path-and-artifact-name-validation'
+import {FilesNotFoundError} from '../shared/errors'
 
 export interface UploadZipSpecification {
   /**
@@ -27,14 +28,14 @@ export interface UploadZipSpecification {
  */
 export function validateRootDirectory(rootDirectory: string): void {
   if (!fs.existsSync(rootDirectory)) {
-    throw new Error(
+    throw new FilesNotFoundError([
       `The provided rootDirectory ${rootDirectory} does not exist`
-    )
+    ])
   }
   if (!fs.statSync(rootDirectory).isDirectory()) {
-    throw new Error(
+    throw new FilesNotFoundError([
       `The provided rootDirectory ${rootDirectory} is not a valid directory`
-    )
+    ])
   }
   info(`Root directory input is valid!`)
 }

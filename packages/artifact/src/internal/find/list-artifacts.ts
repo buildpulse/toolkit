@@ -2,6 +2,7 @@ import * as core from '@actions/core'
 import { S3ArtifactManager } from '../s3/artifact-manager'
 import { getS3Config } from '../shared/config'
 import { ListArtifactsResponse, Artifact } from '../shared/interfaces'
+import { getArtifactManager } from '../shared/util'
 
 /**
  * Lists all artifacts in S3 storage
@@ -10,8 +11,7 @@ import { ListArtifactsResponse, Artifact } from '../shared/interfaces'
 export async function listArtifacts(
   latest = false
 ): Promise<ListArtifactsResponse> {
-  const s3Config = getS3Config()
-  const artifactManager = new S3ArtifactManager(s3Config)
+  const artifactManager = getArtifactManager()
 
   try {
     let artifacts = await artifactManager.listArtifacts()
@@ -27,8 +27,7 @@ export async function listArtifacts(
     return { artifacts }
   } catch (error) {
     core.debug(`Failed to list artifacts: ${error}`)
-    // Return empty array instead of throwing on error
-    return { artifacts: [] }
+    throw error
   }
 }
 

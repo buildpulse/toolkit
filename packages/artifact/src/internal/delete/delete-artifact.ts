@@ -1,7 +1,9 @@
 import * as core from '@actions/core'
 import { S3ArtifactManager } from '../s3/artifact-manager'
-import { getS3Config } from '../shared/config'
+import { getArtifactManager } from '../shared/util'
 import { DeleteArtifactResponse } from '../shared/interfaces'
+import { retry } from '../shared/retry'
+import { ArtifactNotFoundError } from '../shared/errors'
 
 /**
  * Deletes an artifact from S3 storage
@@ -12,23 +14,22 @@ export async function deleteArtifact(
   artifactId: string,
   options?: { failIfNotFound?: boolean }
 ): Promise<DeleteArtifactResponse> {
-  const s3Config = getS3Config()
-  const artifactManager = new S3ArtifactManager(s3Config)
+  const artifactManager = getArtifactManager()
 
   try {
-    const result = await artifactManager.deleteArtifact(`artifacts/${artifactId}`)
+    const result = await retry(
+      () => artifactManager.deleteArtifact(artifactId),
+      {
+        retryableErrors: ['Temporary failure', 'timeout']
+      }
+    )
     core.info(`Artifact with ID ${artifactId} deleted`)
-    return {
-      id: parseInt(artifactId)
-    }
+    return result
   } catch (error) {
-    if (options?.failIfNotFound) {
-      throw error
-    }
-    // Log but don't fail if artifact not found and failIfNotFound is false
     core.debug(`Failed to delete artifact ${artifactId}: ${error}`)
-    return {
-      id: parseInt(artifactId)
+    if (error instanceof ArtifactNotFoundError && !options?.failIfNotFound) {
+      return { id: parseInt(artifactId) }
     }
+    throw error
   }
 }
