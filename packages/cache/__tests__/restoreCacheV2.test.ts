@@ -142,7 +142,7 @@ test('restore with gzip compressed cache found', async () => {
   const signedDownloadUrl = 'https://blob-storage.local?signed=true'
   const cacheVersion =
     'd90f107aaeb22920dba0c637a23c37b5bc497b4dfa3b07fe3f79bf88a273c11b'
-  const options = {useAzureSdk: true} as DownloadOptions
+  const options = {useS3: true} as DownloadOptions
 
   const getCacheVersionMock = jest.spyOn(cacheUtils, 'getCacheVersion')
   getCacheVersionMock.mockReturnValue(cacheVersion)
@@ -218,7 +218,7 @@ test('restore with zstd compressed cache found', async () => {
   const signedDownloadUrl = 'https://blob-storage.local?signed=true'
   const cacheVersion =
     '8e2e96a184cb0cd6b48285b176c06a418f3d7fce14c29d9886fd1bb4f05c513d'
-  const options = {useAzureSdk: true} as DownloadOptions
+  const options = {useS3: true} as DownloadOptions
 
   const getCacheVersionMock = jest.spyOn(cacheUtils, 'getCacheVersion')
   getCacheVersionMock.mockReturnValue(cacheVersion)

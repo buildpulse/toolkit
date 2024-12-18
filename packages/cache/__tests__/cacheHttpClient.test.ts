@@ -158,7 +158,7 @@ test('downloadCache uses http-client when overridden', async () => {
   const archiveLocation = 'http://foo.blob.core.windows.net/bar/baz'
   const archivePath = '/foo/bar'
   const options: DownloadOptions = {
-    useAzureSdk: false,
+    useS3: false,
     concurrentBlobDownloads: false
   }
 

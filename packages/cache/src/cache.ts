@@ -218,10 +218,10 @@ async function restoreCacheV2(
   options?: DownloadOptions,
   enableCrossOsArchive = false
 ): Promise<string | undefined> {
-  // Override UploadOptions to force the use of Azure
+  // Override DownloadOptions to force the use of S3
   options = {
     ...options,
-    useAzureSdk: true
+    useS3: true
   }
   restoreKeys = restoreKeys || []
   const keys = [primaryKey, ...restoreKeys]
@@ -462,14 +462,14 @@ async function saveCacheV2(
   options?: UploadOptions,
   enableCrossOsArchive = false
 ): Promise<number> {
-  // Override UploadOptions to force the use of Azure
+  // Override UploadOptions to force the use of S3
   // ...options goes first because we want to override the default values
   // set in UploadOptions with these specific figures
   options = {
     ...options,
     uploadChunkSize: 64 * 1024 * 1024, // 64 MiB
     uploadConcurrency: 8, // 8 workers for parallel upload
-    useAzureSdk: true
+    useS3: true
   }
   const compressionMethod = await utils.getCompressionMethod()
   const twirpClient = cacheTwirpClient.internalCacheTwirpClient()
@@ -512,6 +512,7 @@ async function saveCacheV2(
     }
 
     // Set the archive size in the options, will be used to display the upload progress
+    options = options || {}
     options.archiveSizeBytes = archiveFileSize
 
     core.debug('Reserving Cache')
