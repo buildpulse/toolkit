@@ -14,9 +14,7 @@ export function isGhes(): boolean {
 export function getCacheServiceVersion(): string {
   // Cache service v2 is not supported on GHES. We will default to
   // cache service v1 even if the feature flag was enabled by user.
-  if (isGhes()) return 'v1'
-
-  return process.env['ACTIONS_CACHE_SERVICE_V2'] ? 'v2' : 'v1'
+  return 'v2'
 }
 
 export function getCacheServiceURL(): string {
