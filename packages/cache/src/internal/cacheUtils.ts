@@ -27,11 +27,7 @@ export async function createTempDirectory(): Promise<string> {
       // On Windows use the USERPROFILE env variable
       baseLocation = process.env['USERPROFILE'] || 'C:\\'
     } else {
-      if (process.platform === 'darwin') {
-        baseLocation = '/Users'
-      } else {
-        baseLocation = '/home'
-      }
+      baseLocation = '/tmp'
     }
     tempDirectory = path.join(baseLocation, 'actions', 'temp')
   }
@@ -53,20 +49,39 @@ export async function resolvePaths(patterns: string[]): Promise<string[]> {
   })
 
   for await (const file of globber.globGenerator()) {
-    const relativeFile = path
-      .relative(workspace, file)
-      .replace(new RegExp(`\\${path.sep}`, 'g'), '/')
-    core.debug(`Matched: ${relativeFile}`)
-    // Paths are made relative so the tar entries are all relative to the root of the workspace.
-    if (relativeFile === '') {
-      // path.relative returns empty string if workspace and file are equal
-      paths.push('.')
+    // Convert path separators to forward slashes for consistency
+    const normalizedPath = file.replace(new RegExp(`\\${path.sep}`, 'g'), '/')
+    core.debug(`Matched: ${normalizedPath}`)
+
+    // Handle workspace root case
+    if (normalizedPath === workspace) {
+      paths.push(workspace)
     } else {
-      paths.push(`${relativeFile}`)
+      paths.push(normalizedPath)
     }
   }
 
   return paths
+}
+
+/**
+ * Constructs full paths without checking file existence
+ * @param paths List of paths to construct
+ * @returns Array of constructed full paths
+ */
+export async function constructPaths(paths: string[]): Promise<string[]> {
+  const workspace = process.env['GITHUB_WORKSPACE'] ?? process.cwd()
+  const constructedPaths: string[] = []
+
+  for (const inputPath of paths) {
+    // Convert path separators to forward slashes for consistency
+    const normalizedPath = path
+      .join(workspace, inputPath)
+      .replace(new RegExp(`\\${path.sep}`, 'g'), '/')
+    constructedPaths.push(normalizedPath)
+  }
+
+  return constructedPaths
 }
 
 export async function unlinkFile(filePath: fs.PathLike): Promise<void> {
