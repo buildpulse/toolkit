@@ -179,6 +179,7 @@ export async function saveCache(
   options?: UploadOptions,
   enableCrossOsArchive = false
 ): Promise<number> {
+  core.debug('saveCache called')
   checkPaths(paths)
   checkKey(key)
 

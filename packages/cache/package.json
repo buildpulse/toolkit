@@ -1,6 +1,6 @@
 {
   "name": "@buildpulse/cache",
-  "version": "4.0.9",
+  "version": "4.0.11",
   "preview": true,
   "description": "Actions BuildPulse cache lib",
   "keywords": [

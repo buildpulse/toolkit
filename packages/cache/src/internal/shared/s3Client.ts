@@ -10,14 +10,12 @@ import {
   ListObjectsV2Command
 } from '@aws-sdk/client-s3'
 import {Readable, pipeline} from 'stream'
+import * as exec from '@actions/exec'
 import * as utils from '../../internal/cacheUtils'
 import {promisify} from 'util'
 import * as core from '@actions/core'
 import * as fs from 'fs'
 import * as path from 'path'
-import {createGunzip} from 'zlib'
-import * as zlib from 'zlib'
-import * as tar from 'tar'
 import * as os from 'os'
 import {CompressionMethod} from '../constants'
 import {UploadOptions, DownloadOptions} from 'src/options'
@@ -70,37 +68,53 @@ export function initializeS3Client(): S3Client {
 
 async function compressData(filePath: string, key: string): Promise<string> {
   const compressedFilePath = path.join(os.tmpdir(), `${path.basename(key)}.gz`)
-  const fileContent = await fs.promises.readFile(filePath)
 
-  return new Promise((resolve, reject) => {
-    const writeStream = fs.createWriteStream(compressedFilePath)
-    const gzip = zlib.createGzip()
-
-    const readStream = Readable.from(fileContent)
-    readStream
-      .pipe(gzip)
-      .pipe(writeStream)
-      .on('finish', () => resolve(compressedFilePath))
-      .on('error', reject)
+  const writeStream = fs.createWriteStream(compressedFilePath)
+  const startTime = new Date()
+  await exec.exec('pigz', ['-9', '-c', filePath], {
+    listeners: {
+      stdout: (data: Buffer) => writeStream.write(data)
+    },
+    silent: true
   })
+
+  core.debug(
+    `Compressed ${filePath} in ${new Date().getTime() - startTime.getTime()} ms`
+  )
+
+  return compressedFilePath
 }
 
 async function compressDirectory(
   dirPath: string,
   key: string
 ): Promise<string> {
-  const tempFile = path.join(os.tmpdir(), `${path.basename(key)}.tar.gz`)
+  const tempDir = os.tmpdir()
+  const tarFile = path.join(tempDir, `${path.basename(key)}.tar`)
+  const compressedFile = path.join(tempDir, `${path.basename(key)}.tar.gz`)
 
-  await tar.create(
-    {
-      gzip: true,
-      file: tempFile,
-      cwd: path.dirname(dirPath)
+  // Create tar and pipe to pigz for compression
+  const tarStream = fs.createWriteStream(tarFile)
+  await exec.exec('tar', ['-cf', '-', dirPath], {
+    outStream: tarStream,
+    silent: true
+  })
+
+  const writeStream = fs.createWriteStream(compressedFile)
+  const startTime = new Date()
+  await exec.exec('pigz', ['-9', '-f', tarFile], {
+    listeners: {
+      stdout: (data: Buffer) => writeStream.write(data)
     },
-    [path.basename(dirPath)]
+    silent: true
+  })
+  writeStream.end()
+
+  core.debug(
+    `Compressed ${dirPath} in ${new Date().getTime() - startTime.getTime()} ms`
   )
 
-  return tempFile // Return path of compressed tarball
+  return compressedFile
 }
 
 export async function uploadToS3(
@@ -270,35 +284,29 @@ export async function downloadFromS3(
         cacheEntry.metadata.size = fs.statSync(archiveDestinationPath).size
       }
 
-      const tempUncompressedPath = path.join(
+      const tempDecompressedPath = path.join(
         compressedPath,
         `temp_${path.basename(destinationPath)}`
       )
 
       core.debug(
-        `Uncompressing ${archiveDestinationPath} to ${tempUncompressedPath}`
+        `Decompressing ${archiveDestinationPath} to ${tempDecompressedPath}`
       )
 
-      // Unzip the .gz file first
-      const gunzipStream = createGunzip()
-      await promisify(pipeline)(
-        fs.createReadStream(archiveDestinationPath).pipe(gunzipStream),
-        fs.createWriteStream(tempUncompressedPath)
+      const uncompressWriteStream = fs.createWriteStream(tempDecompressedPath)
+
+      const startTime = new Date()
+      await exec.exec('pigz', ['-dc', archiveDestinationPath], {
+        listeners: {
+          stdout: (data: Buffer) => uncompressWriteStream.write(data)
+        },
+        silent: true
+      })
+      uncompressWriteStream.close()
+
+      core.debug(
+        `Decompressed in ${new Date().getTime() - startTime.getTime()} ms`
       )
-
-      core.debug(`Uncompressed to ${tempUncompressedPath}`)
-
-      const isTar = await isTarFile(tempUncompressedPath)
-      if (isTar) {
-        await promisify(pipeline)(
-          fs.createReadStream(tempUncompressedPath),
-          tar.extract({cwd: directory})
-        )
-        core.debug(`Extracted ${tempUncompressedPath} to ${destinationPath}`)
-      } else {
-        fs.renameSync(tempUncompressedPath, destinationPath)
-        core.debug(`Moved ${tempUncompressedPath} to ${destinationPath}`)
-      }
     } else {
       throw new Error('Invalid response body from S3')
     }
@@ -309,31 +317,6 @@ export async function downloadFromS3(
   } catch (error) {
     throw new Error(`Failed to download cache from S3: ${error}`)
   }
-}
-
-async function isTarFile(filePath: string): Promise<boolean> {
-  const fd = await fs.promises.open(filePath, 'r')
-  const buffer = Buffer.alloc(512) // Read the first 512 bytes (tar header size)
-
-  await fd.read(buffer, 0, 512, 0)
-  await fd.close()
-
-  // The magic number "ustar" is located at byte positions 257-262
-  const tarMagic = buffer.toString('ascii', 257, 262)
-
-  return tarMagic === 'ustar'
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-async function isTarGz(filePath: string): Promise<boolean> {
-  const fd = await fs.promises.open(filePath, 'r')
-  const buffer = Buffer.alloc(262)
-  await fd.read(buffer, 0, 262, 0)
-
-  await fd.close()
-  const isGzip = buffer[0] === 0x1f && buffer[1] === 0x8b
-  const isTar = buffer.toString('ascii', 257, 262) === 'ustar'
-  return isGzip && isTar
 }
 
 export async function getCacheEntry(
