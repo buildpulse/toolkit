@@ -150,6 +150,7 @@ export async function uploadToS3(
       Bucket: bucketName,
       Key: s3Key,
       Body: fileStream,
+      ContentLength: fileSize,
       Metadata: {
         cacheEntry: JSON.stringify(cacheEntry)
       }

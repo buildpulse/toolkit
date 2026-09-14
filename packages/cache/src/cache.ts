@@ -141,8 +141,6 @@ async function restoreCacheV2(
 
         return undefined
       }
-
-      primaryKey = cacheEntry.metadata.key
     }
 
     if (options?.lookupOnly) {
