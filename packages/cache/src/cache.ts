@@ -1,6 +1,13 @@
 import * as core from '@actions/core'
 import * as utils from './internal/cacheUtils'
 import * as s3Client from './internal/shared/s3Client'
+import {report} from './internal/shared/cacheErrors'
+import {
+  CredentialSource,
+  resolveBucket,
+  resolveCredentials,
+  resolveRegion
+} from './internal/shared/credentials'
 import {DownloadOptions, UploadOptions} from './options'
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -42,7 +49,7 @@ function checkKey(key: string): void {
 
 // Add S3 configuration helper
 function getS3Config(): {bucketName: string} {
-  const bucketName = process.env.BP_CACHE_S3_BUCKET
+  const bucketName = resolveBucket()
   if (!bucketName) {
     throw new Error('BP_CACHE_S3_BUCKET environment variable is not set')
   }
@@ -50,18 +57,35 @@ function getS3Config(): {bucketName: string} {
 }
 
 /**
- * isFeatureAvailable to check the presence of Actions cache service
+ * Whether a cache is configured and usable.
  *
- * @returns boolean return true if Actions cache service feature is available, otherwise false
+ * This asks whether the three things a cache actually needs are present: a
+ * bucket, a region, and some source of credentials. It used to ask something
+ * narrower and wrong -- whether `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+ * were set as environment variables. Those are one way to carry credentials
+ * among several, and they are not the way a runner that uses a shared
+ * credentials file or a container credential endpoint carries them. On such a
+ * runner this returned false and every consumer skipped caching entirely, while
+ * reporting it as an inability to contact a cache service that was never
+ * involved. Nothing failed, so nothing was noticed.
+ *
+ * @returns boolean true if a cache backend is configured, otherwise false
  */
 export function isFeatureAvailable(): boolean {
-  return !!(
-    process.env['ACTIONS_CACHE_URL'] || // Original cache service
-    (process.env['AWS_ACCESS_KEY_ID'] &&
-      process.env['AWS_SECRET_ACCESS_KEY'] &&
-      process.env['AWS_REGION'] &&
-      process.env['BP_CACHE_S3_BUCKET'])
-  )
+  if (process.env['ACTIONS_CACHE_URL']) {
+    // Original cache service.
+    return true
+  }
+  if (!resolveBucket() || !resolveRegion().region) {
+    return false
+  }
+  // Must not throw: callers treat this as a plain predicate, and a throw here
+  // would fail the step rather than disable the cache.
+  try {
+    return resolveCredentials().source !== CredentialSource.None
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -159,9 +183,14 @@ async function restoreCacheV2(
     const typedError = error as Error
     if (typedError.name === ValidationError.name) {
       throw error
-    } else {
-      core.warning(`Failed to restore: ${typedError.message}`)
     }
+    // Was a flat `core.warning("Failed to restore: ...")` for every failure
+    // alike, so a rejected credential read as an ordinary hiccup next to a
+    // genuine miss. report() raises a denial to an annotation naming the
+    // credential source, and leaves a miss quiet.
+    report('restore', error, {
+      credentialSource: s3Client.resolvedCredentialSource()
+    })
 
     return undefined
   }
@@ -232,9 +261,10 @@ async function saveCacheV2(
 
       if (typedError.name === ValidationError.name) {
         throw error
-      } else {
-        core.warning(`Failed to save: ${typedError.message}`)
       }
+      report('save', error, {
+        credentialSource: s3Client.resolvedCredentialSource()
+      })
     }
   }
 

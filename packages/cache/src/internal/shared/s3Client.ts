@@ -20,7 +20,19 @@ import * as zlib from 'zlib'
 import * as tar from 'tar'
 import * as os from 'os'
 import {CompressionMethod} from '../constants'
-import {UploadOptions, DownloadOptions} from 'src/options'
+// Relative, not 'src/options'. The non-relative form only resolved because this
+// package's tsconfig sets baseUrl to the package root; anything consuming the
+// sources directly -- ts-jest, most obviously -- resolved it against the repo
+// root and failed. That is why five of this package's test suites, including
+// the only one covering isFeatureAvailable, could not compile.
+import {UploadOptions, DownloadOptions} from '../../options'
+import {
+  CredentialOverrides,
+  CredentialSource,
+  resolveCredentials,
+  resolveRegion
+} from './credentials'
+import {CacheFailure, classify, describe} from './cacheErrors'
 
 // Add interfaces for cache metadata
 interface S3CacheMetadata {
@@ -44,26 +56,65 @@ interface CacheVersionOptions {
 // eslint-disable-next-line import/no-mutable-exports
 export let s3Client: S3Client
 
-export function initializeS3Client(): S3Client {
+/**
+ * Where this client's credentials came from. Kept so a denial can name the
+ * source that produced the rejected credentials, which is the single most
+ * useful fact when one turns up in a log.
+ */
+let credentialSource: string = CredentialSource.None
+
+export function resolvedCredentialSource(): string {
+  return credentialSource
+}
+
+/** Test seam: the client and the recorded source are module state. */
+export function resetS3Client(): void {
+  s3Client = undefined as unknown as S3Client
+  credentialSource = CredentialSource.None
+}
+
+export function initializeS3Client(
+  overrides: CredentialOverrides = {}
+): S3Client {
   if (s3Client) {
     return s3Client
   }
 
-  const accessKeyId = process.env.AWS_ACCESS_KEY_ID
-  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY
-  const region = process.env.AWS_REGION
-
-  if (!accessKeyId || !secretAccessKey || !region) {
-    throw new Error('AWS credentials or region not provided')
+  const {region, fromAmbient} = resolveRegion(overrides)
+  if (!region) {
+    throw new Error(
+      'No region for the cache bucket. Set BP_CACHE_AWS_REGION (or AWS_REGION).'
+    )
   }
 
-  s3Client = new S3Client({
-    credentials: {
-      accessKeyId,
-      secretAccessKey
-    },
-    region
-  })
+  const resolved = resolveCredentials(overrides)
+  credentialSource = resolved.source
+  if (!resolved.credentials) {
+    throw new Error(
+      'No credentials for the cache bucket. Supply them with ' +
+        'BP_CACHE_AWS_CREDENTIALS_FILE, or with BP_CACHE_AWS_ACCESS_KEY_ID and ' +
+        'BP_CACHE_AWS_SECRET_ACCESS_KEY. The ambient AWS_ACCESS_KEY_ID and ' +
+        'AWS_SECRET_ACCESS_KEY are deliberately not used: they belong to the ' +
+        'job, not to the cache.'
+    )
+  }
+
+  core.debug(
+    `Cache region ${region}${
+      fromAmbient ? ' (from AWS_REGION; prefer BP_CACHE_AWS_REGION)' : ''
+    }`
+  )
+  core.debug(
+    `Cache credentials from ${resolved.source}${
+      resolved.detail ? ` -- ${resolved.detail}` : ''
+    }`
+  )
+
+  // The provider is always explicit. Handing the SDK a config with no
+  // `credentials` falls back to its default chain, whose first link is the
+  // ambient AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY pair -- the exact hijack
+  // this resolution exists to prevent.
+  s3Client = new S3Client({region, credentials: resolved.credentials})
 
   return s3Client
 }
@@ -312,7 +363,12 @@ export async function downloadFromS3(
       `Successfully downloaded cache from S3 bucket '${bucketName}' with key '${key}' at '${destinationPath}'`
     )
   } catch (error) {
-    throw new Error(`Failed to download cache from S3: ${error}`)
+    // Rethrown as-is. This used to build a bare Error by stringifying the
+    // SDK's, which discarded `name` and `$metadata` -- the only things that
+    // tell "nothing is cached under this key" apart from "we are not allowed
+    // to read it". The error now reaches the caller intact so it can be
+    // classified.
+    throw error
   }
 }
 
@@ -372,7 +428,11 @@ export async function getCacheEntry(
       }
     }
   } catch (error) {
-    if (error.name === 'NotFound') {
+    // Only an actual miss is absorbed. Matching on the literal name 'NotFound'
+    // meant a 404 reported under any other name became a hard error, and -- far
+    // worse in the other direction -- left every non-miss to be swallowed
+    // further up as though it were one.
+    if (classify(error) === CacheFailure.Miss) {
       return {exists: false}
     }
     throw error
@@ -417,7 +477,14 @@ export async function listCacheEntries(
 
     return entries
   } catch (error) {
-    core.warning(`Failed to list cache entries: ${error}`)
+    // A denied ListObjectsV2 returns no entries, which is indistinguishable
+    // from a restore key that genuinely matches nothing. That is the precise
+    // shape of the silent failure this change exists to remove, so a denial is
+    // raised rather than logged and flattened to an empty list.
+    if (classify(error) === CacheFailure.Auth) {
+      throw error
+    }
+    core.warning(`Failed to list cache entries: ${describe(error)}`)
     return []
   }
 }
